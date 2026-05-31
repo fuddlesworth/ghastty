@@ -748,8 +748,7 @@ bool MainWindow::confirmCloseSurfaces(
   QMessageBox box(this);
   box.setIcon(QMessageBox::Warning);
   box.setWindowTitle(question);
-  box.setText(question);
-  box.setInformativeText(body);
+  box.setText(body);
   QPushButton *close = box.addButton(verb, QMessageBox::DestructiveRole);
   QPushButton *cancel = box.addButton(QStringLiteral("Cancel"),
                                       QMessageBox::RejectRole);
@@ -777,8 +776,7 @@ void MainWindow::closeAllWindows(bool thenQuit) {
     QMessageBox box(live.isEmpty() ? nullptr : live.first());
     box.setIcon(QMessageBox::Warning);
     box.setWindowTitle(question);
-    box.setText(question);
-    box.setInformativeText(body);
+    box.setText(body);
     QPushButton *go = box.addButton(verb, QMessageBox::DestructiveRole);
     QPushButton *cancel = box.addButton(QStringLiteral("Cancel"),
                                         QMessageBox::RejectRole);
