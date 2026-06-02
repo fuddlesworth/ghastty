@@ -27,6 +27,10 @@ const vulkan_host = if (build_config.renderer == .vulkan)
     @import("../vulkan/Host.zig")
 else
     void;
+const DmabufPaintable = if (build_config.renderer == .vulkan)
+    @import("../vulkan/DmabufPaintable.zig").DmabufPaintable
+else
+    void;
 const Common = @import("../class.zig").Common;
 const Application = @import("application.zig").Application;
 const Config = @import("config.zig").Config;
@@ -625,6 +629,22 @@ pub const Surface = extern struct {
         /// The GLArea that renders the actual surface. This is a binding
         /// to the template so it doesn't have to be unrefed manually.
         gl_area: *gtk.GLArea,
+
+        /// Sibling Picture widget that hosts the Vulkan renderer's
+        /// dmabuf output. Always present in the template; only
+        /// assigned a paintable on `-Drenderer=vulkan` builds. On
+        /// OpenGL builds it stays empty and the GLArea (above it
+        /// in the inner Overlay) covers it.
+        present_picture: *gtk.Picture,
+
+        /// Per-surface DmabufPaintable backing `present_picture`.
+        /// Strong ref; freed in `dispose`. Vulkan builds only;
+        /// `void` on OpenGL builds so the field collapses out of
+        /// the Private layout.
+        dmabuf_paintable: if (build_config.renderer == .vulkan)
+            *DmabufPaintable
+        else
+            void = if (build_config.renderer == .vulkan) undefined else {},
 
         /// The labels for the left/right sides of the URL hover tooltip.
         url_left: *gtk.Label,
@@ -1793,15 +1813,27 @@ pub const Surface = extern struct {
 
         const priv = self.private();
 
+        // Vulkan-only widget wiring: stand up the per-surface
+        // DmabufPaintable, attach it to `present_picture`, and
+        // hide the GLArea (it's a no-op on Vulkan but stays in
+        // the tree for input event controllers). Done before
+        // populating `priv.rt_surface` so `userdata` for the
+        // platform callbacks points at the live paintable.
+        if (build_config.renderer == .vulkan) {
+            const paintable = DmabufPaintable.new();
+            priv.dmabuf_paintable = paintable;
+            priv.present_picture.setPaintable(paintable.as(gdk.Paintable));
+            priv.gl_area.as(gtk.Widget).setVisible(@intFromBool(false));
+        }
+
         // Initialize some private fields so they aren't undefined
         priv.rt_surface = if (build_config.renderer == .vulkan) .{
             .surface = self,
-            // Per-surface Vulkan platform descriptor. `userdata` is
-            // the GObject Surface — phase 3 will use it from
-            // `cbPresent` to route the dmabuf to the right widget.
-            // Phase 2: the present callback discards the fd, so the
-            // userdata is set but unread.
-            .platform = vulkan_host.asPlatform(self),
+            // `userdata` is the per-surface DmabufPaintable.
+            // libghostty passes it back to `cbPresent`, which
+            // calls `setTexture` on it directly — no detour
+            // through the GObject Surface.
+            .platform = vulkan_host.asPlatform(@ptrCast(priv.dmabuf_paintable)),
         } else .{
             .surface = self,
         };
@@ -1914,6 +1946,15 @@ pub const Surface = extern struct {
                 log.warn("unable to remove pending horizontal scroll reset source", .{});
             }
             priv.pending_horizontal_scroll_reset = null;
+        }
+
+        // Drop the strong ref on the dmabuf paintable. The Picture
+        // also held a ref (via setPaintable); when the Picture is
+        // disposed below it'll drop its ref too, and the paintable
+        // finalizes — which drops the texture, which drops the
+        // dup'd dmabuf fd.
+        if (build_config.renderer == .vulkan) {
+            priv.dmabuf_paintable.as(gobject.Object).unref();
         }
 
         // This works around a GTK double-free bug where if you bind
@@ -3245,29 +3286,40 @@ pub const Surface = extern struct {
     ) callconv(.c) void {
         log.debug("realize", .{});
 
-        // Make the GL area current so we can detect any OpenGL errors. If
-        // we have errors here we can't render and we switch to the error
-        // state.
         const priv = self.private();
-        priv.gl_area.makeCurrent();
-        if (priv.gl_area.getError()) |err| {
-            log.warn("failed to make GL context current: {s}", .{err.f_message orelse "(no message)"});
-            log.warn("this error is almost always due to a library, driver, or GTK issue", .{});
-            log.warn("this is a common cause of this issue: https://ghostty.org/docs/help/gtk-opengl-context", .{});
-            self.setError(true);
-            return;
-        }
 
-        // If we already have an initialized surface then we notify it.
-        // If we don't, we'll initialize it on the first resize so we have
-        // our proper initial dimensions.
-        if (priv.core_surface) |v| realize: {
-            v.renderer.displayRealized() catch |err| {
-                log.warn("core displayRealized failed err={}", .{err});
-                break :realize;
-            };
+        // OpenGL-only: bring the GL context current and notify the
+        // renderer. The Vulkan renderer doesn't use this widget's
+        // GL context — it owns its own VkDevice (see
+        // `apprt/gtk/vulkan/Host.zig`) — and `displayRealized` /
+        // `displayUnrealized` are no-ops on Vulkan, so we skip the
+        // whole block. We still need to set up the input method
+        // below, since the GLArea is the focus widget regardless
+        // of the renderer.
+        if (build_config.renderer != .vulkan) {
+            // Make the GL area current so we can detect any OpenGL errors. If
+            // we have errors here we can't render and we switch to the error
+            // state.
+            priv.gl_area.makeCurrent();
+            if (priv.gl_area.getError()) |err| {
+                log.warn("failed to make GL context current: {s}", .{err.f_message orelse "(no message)"});
+                log.warn("this error is almost always due to a library, driver, or GTK issue", .{});
+                log.warn("this is a common cause of this issue: https://ghostty.org/docs/help/gtk-opengl-context", .{});
+                self.setError(true);
+                return;
+            }
 
-            self.redraw();
+            // If we already have an initialized surface then we notify it.
+            // If we don't, we'll initialize it on the first resize so we have
+            // our proper initial dimensions.
+            if (priv.core_surface) |v| realize: {
+                v.renderer.displayRealized() catch |err| {
+                    log.warn("core displayRealized failed err={}", .{err});
+                    break :realize;
+                };
+
+                self.redraw();
+            }
         }
 
         // Setup our input method. We do this here because this will
@@ -3282,28 +3334,32 @@ pub const Surface = extern struct {
     ) callconv(.c) void {
         log.debug("unrealize", .{});
 
-        // Notify our core surface
         const priv = self.private();
-        if (priv.core_surface) |surface| {
-            // There is no guarantee that our GLArea context is current
-            // when unrealize is emitted, so we need to make it current.
-            gl_area.makeCurrent();
-            if (gl_area.getError()) |err| {
-                // I don't know a scenario this can happen, but it means
-                // we probably leaked memory because displayUnrealized
-                // below frees resources that aren't specifically OpenGL
-                // related. I didn't make the OpenGL renderer handle this
-                // scenario because I don't know if its even possible
-                // under valid circumstances, so let's log.
-                log.warn(
-                    "gl_area_make_current failed in unrealize msg={s}",
-                    .{err.f_message orelse "(no message)"},
-                );
-                log.warn("OpenGL resources and memory likely leaked", .{});
-                return;
-            }
 
-            surface.renderer.displayUnrealized();
+        // See `glareaRealize` for why this is OpenGL-only.
+        if (build_config.renderer != .vulkan) {
+            // Notify our core surface
+            if (priv.core_surface) |surface| {
+                // There is no guarantee that our GLArea context is current
+                // when unrealize is emitted, so we need to make it current.
+                gl_area.makeCurrent();
+                if (gl_area.getError()) |err| {
+                    // I don't know a scenario this can happen, but it means
+                    // we probably leaked memory because displayUnrealized
+                    // below frees resources that aren't specifically OpenGL
+                    // related. I didn't make the OpenGL renderer handle this
+                    // scenario because I don't know if its even possible
+                    // under valid circumstances, so let's log.
+                    log.warn(
+                        "gl_area_make_current failed in unrealize msg={s}",
+                        .{err.f_message orelse "(no message)"},
+                    );
+                    log.warn("OpenGL resources and memory likely leaked", .{});
+                    return;
+                }
+
+                surface.renderer.displayUnrealized();
+            }
         }
 
         // Unset our input method
@@ -3344,6 +3400,14 @@ pub const Surface = extern struct {
         _: *gdk.GLContext,
         self: *Self,
     ) callconv(.c) c_int {
+        // The Vulkan renderer runs on its own thread (see
+        // `gtk/App.zig::must_draw_from_app_thread`) and presents
+        // through the per-surface DmabufPaintable; the GLArea is
+        // hidden and only kept in the tree for input event
+        // controllers. Calling `drawFrame` from this callback
+        // would race the renderer thread.
+        if (build_config.renderer == .vulkan) return 1;
+
         // If we don't have a surface then we failed to initialize for
         // some reason and there's nothing to draw to the GLArea.
         const priv = self.private();
@@ -3620,6 +3684,7 @@ pub const Surface = extern struct {
 
             // Bindings
             class.bindTemplateChildPrivate("gl_area", .{});
+            class.bindTemplateChildPrivate("present_picture", .{});
             class.bindTemplateChildPrivate("url_left", .{});
             class.bindTemplateChildPrivate("url_right", .{});
             class.bindTemplateChildPrivate("child_exited_overlay", .{});

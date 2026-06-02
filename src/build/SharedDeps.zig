@@ -670,6 +670,7 @@ fn addGtkNg(
             .{ "gio", "gio2" },
             .{ "glib", "glib2" },
             .{ "gobject", "gobject2" },
+            .{ "graphene", "graphene1" },
             .{ "gtk", "gtk4" },
             .{ "xlib", "xlib2" },
         };

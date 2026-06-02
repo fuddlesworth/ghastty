@@ -20,20 +20,48 @@ Overlay terminal_page {
     hexpand: true;
     vexpand: true;
 
-    GLArea gl_area {
-      realize => $gl_realize();
-      unrealize => $gl_unrealize();
-      map => $gl_map();
-      unmap => $gl_unmap();
-      render => $gl_render();
-      resize => $gl_resize();
+    // Inner Overlay so the Vulkan-only `present_picture` can sit
+    // behind the GLArea on Vulkan builds. The OpenGL renderer
+    // ignores `present_picture` (the apprt code never assigns it
+    // a paintable) and the GLArea covers it; the Vulkan renderer
+    // hides the GLArea programmatically and the Picture is what
+    // the user sees. The GLArea has to stay in the tree because
+    // every input event controller below targets it.
+    Overlay {
       hexpand: true;
       vexpand: true;
-      focusable: true;
-      focus-on-click: true;
-      has-stencil-buffer: false;
-      has-depth-buffer: false;
-      allowed-apis: gl;
+
+      child: Picture present_picture {
+        // Stretches the dmabuf texture to the widget's pixel size.
+        // The Vulkan renderer already produces frames sized to the
+        // surface size we report through `surfaceSize`, so this is
+        // a 1:1 sample in the steady state; `fill` only matters
+        // mid-resize, when the renderer is one frame behind GTK.
+        content-fit: fill;
+        // No paintable on OpenGL builds → Picture renders nothing.
+        // On Vulkan builds the apprt assigns a per-surface
+        // `DmabufPaintable` from `class/surface.zig` after
+        // template instantiation.
+        can-target: false;
+        focusable: false;
+      };
+
+      [overlay]
+      GLArea gl_area {
+        realize => $gl_realize();
+        unrealize => $gl_unrealize();
+        map => $gl_map();
+        unmap => $gl_unmap();
+        render => $gl_render();
+        resize => $gl_resize();
+        hexpand: true;
+        vexpand: true;
+        focusable: true;
+        focus-on-click: true;
+        has-stencil-buffer: false;
+        has-depth-buffer: false;
+        allowed-apis: gl;
+      }
     }
 
     PopoverMenu context_menu {

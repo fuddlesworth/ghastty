@@ -26,8 +26,10 @@ const std = @import("std");
 const builtin = @import("builtin");
 const apprt = @import("../../../apprt.zig");
 const gdk = @import("gdk");
+const gobject = @import("gobject");
 const vulkan = @import("vulkan");
 const vk = vulkan.c;
+const DmabufPaintable = @import("DmabufPaintable.zig").DmabufPaintable;
 
 const log = std.log.scoped(.gtk_vulkan_host);
 
@@ -360,32 +362,30 @@ fn cbGetSupportedModifiers(
     return if (out != null) @min(matched, capacity) else matched;
 }
 
-/// Build a `GdkDmabufTexture` from the dmabuf fd libghostty hands us
-/// and immediately drop it. Phase 2 plumbing-only: the goal here is
-/// to exercise the real GDK import path (modifier compatibility,
-/// fd-keepalive contract, color state) without yet wiring the
-/// resulting texture to a visible widget. Phase 3 will replace the
-/// immediate-drop with a per-surface paintable assignment.
+/// Build a `GdkDmabufTexture` from the dmabuf fd libghostty hands
+/// us and install it on the per-surface `DmabufPaintable`
+/// (`userdata`). The paintable swaps the texture atomically and
+/// invalidates its contents, queueing a redraw on the GUI thread.
 ///
 /// libghostty's `present` contract:
 ///   - The fd is *borrowed*; we must `dup()` if we hold it past
 ///     the call. The renderer keeps the underlying VkDeviceMemory
-///     alive — when our dup'd fd is closed, the memory is freed.
+///     alive — when our dup'd fd is closed (via the destroy
+///     notify on the texture), the memory is freed.
 ///   - `image_backed` is true when the dmabuf was exported from a
-///     VkImage (importable as a 2D image). When false, it came from
-///     a VkBuffer fallback (NVIDIA, no COLOR_ATTACHMENT for LINEAR
-///     modifier) and is only usable via mmap + CPU readback —
-///     `linux-dmabuf-v1` import would error. We skip those frames
-///     for now; the real CPU-readback path is a later concern.
+///     VkImage (importable as a 2D image). When false it came
+///     from a VkBuffer fallback (NVIDIA, no COLOR_ATTACHMENT for
+///     LINEAR modifier) and is only usable via mmap + CPU
+///     readback — `linux-dmabuf-v1` import would error. We skip
+///     those frames; the CPU-readback path is a later concern.
 ///
-/// Threading: called from libghostty's renderer thread. The
-/// GdkDmabufTextureBuilder API has no documented thread restriction
-/// for `build()` — it's metadata + an fd hold. Actual GPU import
-/// happens lazily when a renderer renders the texture, which IS
-/// GUI-thread-bound and is the visibility wiring's problem in
-/// phase 3.
+/// Threading: called from libghostty's renderer thread.
+/// `GdkDmabufTextureBuilder.build` has no documented thread
+/// restriction (it's metadata + an fd hold). The actual GPU
+/// import is deferred to the GtkPicture's snapshot path on the
+/// GUI thread.
 fn cbPresent(
-    _: ?*anyopaque,
+    userdata: ?*anyopaque,
     dmabuf_fd: i32,
     drm_format: u32,
     drm_modifier: u64,
@@ -394,6 +394,14 @@ fn cbPresent(
     stride: u32,
     image_backed: bool,
 ) callconv(.c) void {
+    const paintable: *DmabufPaintable = @ptrCast(@alignCast(userdata orelse {
+        // No paintable wired up — this is a contract violation by
+        // the apprt (Surface ctor must populate userdata before
+        // any render). Fail closed so the renderer's fd ownership
+        // contract isn't broken; do nothing else.
+        log.warn("present: null userdata (no paintable)", .{});
+        return;
+    }));
     // Defensive: a negative fd would be a contract violation by
     // libghostty, but we'd rather log than crash.
     if (dmabuf_fd < 0) {
@@ -452,9 +460,13 @@ fn cbPresent(
         return;
     }
 
-    // Phase 2: drop the texture immediately. Phase 3 replaces this
-    // with a per-surface paintable assignment.
-    tex.?.unref();
+    // Hand the texture to the surface's paintable. `setTexture`
+    // takes a strong ref internally; we drop our build-time ref
+    // afterward. The previous texture (if any) is unref'd by the
+    // setter, which cascades to its destroy notify and frees the
+    // previous frame's `VkDeviceMemory`.
+    paintable.setTexture(tex);
+    tex.?.as(gobject.Object).unref();
 }
 
 /// glib.DestroyNotify trampoline that closes the dup'd dmabuf fd.
