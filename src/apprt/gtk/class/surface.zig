@@ -1829,6 +1829,20 @@ pub const Surface = extern struct {
             const paintable = DmabufPaintable.new();
             priv.dmabuf_paintable = paintable;
             priv.present_picture.setPaintable(paintable.as(gdk.Paintable));
+
+            // The shared error_page template is written for the OpenGL
+            // renderer ("Unable to acquire an OpenGL context", plus a
+            // GTK-OpenGL help link). On a Vulkan build that text is
+            // misleading, so retarget it: a Vulkan-specific message and
+            // no GL-specific help link. The page is only shown if
+            // surface init fails (see `initSurface`'s catch).
+            priv.error_page.setDescription(
+                "Unable to initialize Vulkan for rendering. Your GPU or " ++
+                    "driver may not support the required Vulkan 1.3 features " ++
+                    "(VK_KHR_external_memory_fd, VK_EXT_external_memory_dma_buf, " ++
+                    "VK_EXT_image_drm_format_modifier).",
+            );
+            priv.error_page.setChild(null);
         }
 
         // Initialize some private fields so they aren't undefined
@@ -3483,6 +3497,14 @@ pub const Surface = extern struct {
         // If we don't have a surface, then we initialize it.
         self.initSurface() catch |err| {
             log.warn("surface failed to initialize err={}", .{err});
+            // Surface up but unrenderable — show the error page rather
+            // than leaving a blank window. On Vulkan builds this is the
+            // user-visible signal that the GPU/driver couldn't bring up
+            // Vulkan (error.UnsupportedPlatform / error.HostHandleMissing
+            // out of the renderer); the page's text is retargeted for
+            // Vulkan in the ctor. On OpenGL builds it mirrors the
+            // GL-context failure path in `glareaRealize`.
+            self.setError(true);
         };
     }
 
