@@ -15,11 +15,9 @@ const Surface = @import("class/surface.zig").Surface;
 /// builds this collapses to `void` so we don't pay a per-surface cost
 /// for unused function-pointer storage.
 ///
-/// Phase 1 caveat: the field is declared but no GTK code path
-/// constructs a value yet — `src/apprt/gtk/vulkan/Host.zig` will
-/// populate it once the surface integration lands. A `-Drenderer=vulkan
-/// -Dapp-runtime=gtk` build that actually exercises a surface will
-/// crash on first use until that work lands.
+/// On Vulkan builds the `Surface` ctor (`class/surface.zig`) populates
+/// `rt_surface.platform` via `vulkan_host.asPlatform()`, pointing the
+/// `present` callback's userdata at the surface's `DmabufPaintable`.
 pub const Platform = if (build_config.renderer == .vulkan)
     apprt.platform.VulkanPlatform
 else

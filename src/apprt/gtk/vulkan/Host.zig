@@ -15,18 +15,21 @@
 //! the dmabuf-as-importable-image export path the Vulkan renderer
 //! uses to hand frames back to the host.
 //!
-//! Phase 1 scope: instance + device bring-up only. The
-//! `asPlatform()` callback set is shaped but stubbed — `present`
-//! and `get_supported_modifiers` return inert defaults so that a
-//! `-Drenderer=vulkan -Dapp-runtime=gtk` build at least links.
-//! Wiring the real dmabuf import path through `GdkDmabufTexture`
-//! and the Wayland/GDK modifier registry is phase 2.
+//! The host owns the VkInstance/Device/Queue and implements the
+//! platform callbacks: handle lookups resolve through the singleton,
+//! `get_supported_modifiers` reads GDK's dmabuf format registry, and
+//! `present` hands the renderer's frame to the per-surface
+//! `DmabufPaintable` — directly as a `GdkDmabufTexture` for
+//! image-backed (VkImage) frames, or via an mmap + `GdkMemoryTexture`
+//! copy for `.legacy_copy` (LINEAR VkBuffer) frames that can't be
+//! imported as a dmabuf texture.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const apprt = @import("../../../apprt.zig");
 const gdk = @import("gdk");
 const gobject = @import("gobject");
+const glib = @import("glib");
 const vulkan = @import("vulkan");
 const vk = vulkan.c;
 const DmabufPaintable = @import("DmabufPaintable.zig").DmabufPaintable;
@@ -278,7 +281,7 @@ fn findGraphicsQueueFamily(pd: vk.VkPhysicalDevice) ?u32 {
 //
 // Mirror the layout of `qt/src/vulkan/Host.cpp::cb*`. The handle
 // callbacks ignore userdata and resolve through the singleton; the
-// `present` callback's userdata is the per-surface sink (phase 2).
+// `present` callback's userdata is the per-surface DmabufPaintable.
 
 fn cbGetInstanceProcAddr(
     _: ?*anyopaque,
@@ -409,13 +412,15 @@ fn cbPresent(
         return;
     }
 
-    // CPU-readback path not implemented yet. Closing the borrowed
-    // fd is wrong (the contract is borrowed), but we never opened
-    // it ourselves either — the renderer holds the device memory.
-    // Simply returning leaves the fd alone; libghostty closes it
-    // when its `Target` is freed.
+    // `.legacy_copy` frames: the fd is a LINEAR VkBuffer (e.g.
+    // NVIDIA, which doesn't expose COLOR_ATTACHMENT for the LINEAR
+    // modifier, or any GPU/compositor pair with no importable
+    // modifier intersection). It can't be wrapped as a
+    // `GdkDmabufTexture`, so it takes the mmap + `GdkMemoryTexture`
+    // copy path instead. The fd stays borrowed there too — that
+    // path neither dups nor closes it.
     if (!image_backed) {
-        log.debug("present: skipping non-image-backed frame ({d}x{d})", .{ width, height });
+        presentLegacyCopy(paintable, dmabuf_fd, drm_format, width, height, stride);
         return;
     }
 
@@ -469,6 +474,98 @@ fn cbPresent(
     tex.?.as(gobject.Object).unref();
 }
 
+/// `.legacy_copy` present path: the renderer exported a LINEAR
+/// VkBuffer rather than an importable VkImage, so the dmabuf fd
+/// can't be wrapped as a `GdkDmabufTexture`. We mmap it read-only,
+/// copy the pixels into a `GdkMemoryTexture` (a one-shot CPU copy
+/// GTK uploads on the GUI thread), and install it on the paintable.
+/// Mirrors the Qt frontend's mmap + QImage fallback
+/// (`qt/src/GhosttySurface.cpp`), including its size/format guards.
+///
+/// fd ownership: borrowed, per the platform contract. The copy path
+/// neither dups nor closes it — libghostty frees the backing memory
+/// (and the fd) when its `Target` is freed.
+///
+/// Threading: runs on libghostty's renderer thread. The mmap, the
+/// copy into the GBytes, and texture construction are plain
+/// memory/object ops; the GPU upload is deferred to the paintable's
+/// snapshot on the GUI thread, and `setTexture` is thread-safe.
+fn presentLegacyCopy(
+    paintable: *DmabufPaintable,
+    dmabuf_fd: i32,
+    drm_format: u32,
+    width: u32,
+    height: u32,
+    stride: u32,
+) void {
+    // Only DRM_FORMAT_ARGB8888 ('AR24') is handled: the renderer
+    // outputs premultiplied B8G8R8A8 (see `vulkan/Target.zig`
+    // vkFormatToDrmFourcc), which on little-endian is B,G,R,A in
+    // memory == GDK's `b8g8r8a8_premultiplied`. Any other fourcc
+    // would map to the wrong channel order and render miscolored,
+    // so reject it loudly rather than silently.
+    const drm_format_argb8888: u32 = 0x34325241; // 'AR24'
+    if (drm_format != drm_format_argb8888) {
+        log.warn(
+            "present: dropping legacy-copy frame, unsupported drm_format=0x{x:0>8} (only 'AR24'/ARGB8888 is mapped)",
+            .{drm_format},
+        );
+        return;
+    }
+
+    // Validate dimensions before deriving the mmap length. width,
+    // height and stride are bug/attacker-reachable u32s and the byte
+    // count below would otherwise be trusted blindly. Cap on a bound
+    // that dwarfs any real terminal (65536²), require a stride that's
+    // at least tightly-packed BGRA8 and not absurdly large, and
+    // compute the length in u64 so the multiply can't wrap.
+    const max_dim: u32 = 65536;
+    const max_stride: u32 = max_dim * 16;
+    if (width == 0 or height == 0) return;
+    if (width > max_dim or height > max_dim) {
+        log.warn("present: legacy-copy frame too large {d}x{d}", .{ width, height });
+        return;
+    }
+    if (@as(u64, stride) < @as(u64, width) * 4 or stride > max_stride) {
+        log.warn("present: legacy-copy frame bad stride={d} for width={d}", .{ stride, width });
+        return;
+    }
+    const len: usize = @intCast(@as(u64, stride) * @as(u64, height));
+
+    // Map read-only and copy out immediately: the renderer reuses
+    // this host-visible buffer for the next frame, so we must not
+    // retain a live view of it past the copy.
+    const mapped = std.posix.mmap(
+        null,
+        len,
+        std.posix.PROT.READ,
+        .{ .TYPE = .SHARED },
+        dmabuf_fd,
+        0,
+    ) catch |err| {
+        log.warn("present: mmap of dmabuf fd={d} failed: {s}", .{ dmabuf_fd, @errorName(err) });
+        return;
+    };
+    defer std.posix.munmap(mapped);
+
+    // `glib.Bytes.new` copies the data, so the GBytes — and the
+    // texture built from it — outlive the munmap above.
+    const bytes = glib.Bytes.new(mapped.ptr, len);
+    defer bytes.unref();
+
+    const tex = gdk.MemoryTexture.new(
+        @intCast(width),
+        @intCast(height),
+        .b8g8r8a8_premultiplied,
+        bytes,
+        stride,
+    );
+
+    // setTexture takes its own ref; drop our construction ref.
+    paintable.setTexture(tex.as(gdk.Texture));
+    tex.as(gobject.Object).unref();
+}
+
 /// glib.DestroyNotify trampoline that closes the dup'd dmabuf fd.
 /// `data` is the fd cast to a pointer (we never deref it as a
 /// pointer; the cast is just for the void* slot).
@@ -478,8 +575,8 @@ fn fdDestroyNotify(data: ?*anyopaque) callconv(.c) void {
 }
 
 /// Build a `VulkanPlatform` callback struct pointing at this
-/// process-singleton. `userdata` is reserved for the per-surface
-/// present sink; phase 1 always passes null.
+/// process-singleton. `userdata` is the per-surface `DmabufPaintable`,
+/// which libghostty hands back to `cbPresent` for each frame.
 pub fn asPlatform(userdata: ?*anyopaque) apprt.platform.VulkanPlatform {
     return .{
         .userdata = userdata,
