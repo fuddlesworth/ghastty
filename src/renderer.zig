@@ -15,6 +15,9 @@ const size = @import("renderer/size.zig");
 pub const shadertoy = @import("renderer/shadertoy.zig");
 pub const Backend = @import("renderer/backend.zig").Backend;
 pub const GenericRenderer = @import("renderer/generic.zig").Renderer;
+/// The renderer's derived configuration. Backend-independent and shared
+/// across all renderer backends/variants (see `renderer/DerivedConfig.zig`).
+pub const DerivedConfig = @import("renderer/DerivedConfig.zig").DerivedConfig;
 pub const Metal = @import("renderer/Metal.zig");
 pub const OpenGL = @import("renderer/OpenGL.zig");
 pub const Vulkan = @import("renderer/Vulkan.zig");
