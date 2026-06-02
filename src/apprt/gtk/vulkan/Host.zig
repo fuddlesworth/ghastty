@@ -30,6 +30,12 @@ const apprt = @import("../../../apprt.zig");
 const gdk = @import("gdk");
 const gobject = @import("gobject");
 const glib = @import("glib");
+const build_options = @import("build_options");
+/// Only available when the GTK build includes Wayland support. Used
+/// solely to detect whether the default display is a Wayland display
+/// (see `displayIsWayland`); guarded by `build_options.wayland` so
+/// non-Wayland builds never reference it.
+const gdk_wayland = if (build_options.wayland) @import("gdk_wayland") else struct {};
 const vulkan = @import("vulkan");
 const vk = vulkan.c;
 const DmabufPaintable = @import("DmabufPaintable.zig").DmabufPaintable;
@@ -322,6 +328,18 @@ fn cbQueueFamilyIndex(_: ?*anyopaque) callconv(.c) u32 {
     return h.queue_family_index;
 }
 
+/// Whether `display` is a Wayland display. The direct dmabuf-import
+/// present path is only validated on Wayland; on X11 we steer the
+/// renderer to `.legacy_copy` (see `cbGetSupportedModifiers`). On GTK
+/// builds without Wayland support this is comptime-false and the
+/// `gdk_wayland` reference is never analyzed.
+fn displayIsWayland(display: *gdk.Display) bool {
+    return if (comptime build_options.wayland)
+        gobject.ext.cast(gdk_wayland.WaylandDisplay, display) != null
+    else
+        false;
+}
+
 /// Source compositor-supported DRM modifiers from GDK. Two-pass
 /// usage: caller first calls with `out=null, capacity=0` to query
 /// the count, then again with a buffer to fill. Returns the number
@@ -331,12 +349,11 @@ fn cbQueueFamilyIndex(_: ?*anyopaque) callconv(.c) u32 {
 /// `gdk_display_get_dmabuf_formats` returns a `GdkDmabufFormats`
 /// holding the *intersection* of formats both the GPU and the
 /// compositor support — exactly what the Vulkan renderer needs
-/// for its `pickModifier` intersection. Returning 0 (e.g. on
-/// non-Wayland displays where dmabuf is not advertised, or before
-/// a GdkDisplay exists) is fail-safe: the renderer falls back to
-/// legacy_copy mode (CPU readback). Required for direct mode on
-/// NVIDIA, which doesn't expose COLOR_ATTACHMENT for the LINEAR
-/// modifier.
+/// for its `pickModifier` intersection. Returning 0 is fail-safe:
+/// the renderer falls back to legacy_copy mode (CPU readback), which
+/// is required for direct mode on NVIDIA (no COLOR_ATTACHMENT for the
+/// LINEAR modifier) and is also how we deliberately steer X11 — see
+/// the backend gate below.
 fn cbGetSupportedModifiers(
     _: ?*anyopaque,
     drm_format: u32,
@@ -344,6 +361,18 @@ fn cbGetSupportedModifiers(
     capacity: usize,
 ) callconv(.c) usize {
     const display = gdk.Display.getDefault() orelse return 0;
+
+    // The direct dmabuf-import present path (`GdkDmabufTexture` in
+    // `cbPresent`) is only exercised and validated on Wayland. On other
+    // backends (X11) report no modifiers so the renderer falls back to
+    // `.legacy_copy`, presenting through the display-agnostic mmap +
+    // `GdkMemoryTexture` copy path, which is known to work everywhere.
+    // Zero-copy dmabuf scanout on X11 is future work pending validation.
+    if (!displayIsWayland(display)) {
+        log.debug("non-Wayland display: steering renderer to legacy_copy (CPU) present path", .{});
+        return 0;
+    }
+
     const formats = display.getDmabufFormats();
     const total = formats.getNFormats();
 
