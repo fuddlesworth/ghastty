@@ -1814,16 +1814,21 @@ pub const Surface = extern struct {
         const priv = self.private();
 
         // Vulkan-only widget wiring: stand up the per-surface
-        // DmabufPaintable, attach it to `present_picture`, and
-        // hide the GLArea (it's a no-op on Vulkan but stays in
-        // the tree for input event controllers). Done before
-        // populating `priv.rt_surface` so `userdata` for the
-        // platform callbacks points at the live paintable.
+        // DmabufPaintable and attach it to `present_picture` (which
+        // is overlaid on top of the GLArea — see `surface.blp`).
+        // Done before populating `priv.rt_surface` so `userdata` for
+        // the platform callbacks points at the live paintable.
+        //
+        // The GLArea is deliberately left VISIBLE on Vulkan. It owns
+        // the input event controllers and its `resize` signal is what
+        // drives `initSurface`/sizing; hiding it (a hidden GTK widget
+        // gets no size allocation and no input) is what left the
+        // window transparent. It renders nothing on Vulkan
+        // (`glareaRender` early-returns) and sits behind the Picture.
         if (build_config.renderer == .vulkan) {
             const paintable = DmabufPaintable.new();
             priv.dmabuf_paintable = paintable;
             priv.present_picture.setPaintable(paintable.as(gdk.Paintable));
-            priv.gl_area.as(gtk.Widget).setVisible(@intFromBool(false));
         }
 
         // Initialize some private fields so they aren't undefined

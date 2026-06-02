@@ -31,23 +31,16 @@ Overlay terminal_page {
       hexpand: true;
       vexpand: true;
 
-      child: Picture present_picture {
-        // Stretches the dmabuf texture to the widget's pixel size.
-        // The Vulkan renderer already produces frames sized to the
-        // surface size we report through `surfaceSize`, so this is
-        // a 1:1 sample in the steady state; `fill` only matters
-        // mid-resize, when the renderer is one frame behind GTK.
-        content-fit: fill;
-        // No paintable on OpenGL builds → Picture renders nothing.
-        // On Vulkan builds the apprt assigns a per-surface
-        // `DmabufPaintable` from `class/surface.zig` after
-        // template instantiation.
-        can-target: false;
-        focusable: false;
-      };
-
-      [overlay]
-      GLArea gl_area {
+      // The GLArea is the main child on BOTH renderers. It owns every
+      // input event controller below and — crucially — it is the
+      // widget whose `resize` signal drives surface init + sizing
+      // (see `glareaResize`/`initSurface`). It must stay visible even
+      // on Vulkan: a hidden GTK widget gets no size allocation (so no
+      // `resize`, so the surface is never initialized) and no input.
+      // On Vulkan it renders nothing (`gl_render` early-returns) and
+      // sits *behind* `present_picture`; on OpenGL it draws the
+      // terminal and the empty Picture above it is fully transparent.
+      child: GLArea gl_area {
         realize => $gl_realize();
         unrealize => $gl_unrealize();
         map => $gl_map();
@@ -61,6 +54,26 @@ Overlay terminal_page {
         has-stencil-buffer: false;
         has-depth-buffer: false;
         allowed-apis: gl;
+      };
+
+      // Overlaid on top of the GLArea. On OpenGL builds the apprt
+      // never assigns a paintable, so this renders nothing (fully
+      // transparent) and the GLArea below shows through; `can-target:
+      // false` lets input pass to the GLArea. On Vulkan builds the
+      // apprt assigns a per-surface `DmabufPaintable` from
+      // `class/surface.zig` and this is what the user sees.
+      [overlay]
+      Picture present_picture {
+        // Stretches the dmabuf texture to the widget's pixel size.
+        // The Vulkan renderer already produces frames sized to the
+        // surface size we report through `surfaceSize`, so this is
+        // a 1:1 sample in the steady state; `fill` only matters
+        // mid-resize, when the renderer is one frame behind GTK.
+        content-fit: fill;
+        can-target: false;
+        focusable: false;
+        hexpand: true;
+        vexpand: true;
       }
     }
 

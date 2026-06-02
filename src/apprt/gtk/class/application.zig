@@ -2846,6 +2846,14 @@ const Action = struct {
 fn setGtkEnv(config: *const CoreConfig) error{NoSpaceLeft}!void {
     assert(gtk.isInitialized() == 0);
 
+    // On `-Drenderer=vulkan` builds the Vulkan renderer is the whole
+    // point: GDK must keep its Vulkan backend enabled so it can import
+    // and composite the renderer's dmabuf output. Disabling it (the
+    // default below, kept for the OpenGL renderer where GDK Vulkan is
+    // just startup overhead) leaves the GtkPicture with no usable
+    // paintable and the window renders fully transparent.
+    const want_vulkan = build_config.renderer == .vulkan;
+
     var gdk_debug: struct {
         /// output OpenGL debug information
         opengl: bool = false,
@@ -2884,7 +2892,7 @@ fn setGtkEnv(config: *const CoreConfig) error{NoSpaceLeft}!void {
             // From gtk 4.16, GDK_DEBUG is split into GDK_DEBUG and GDK_DISABLE.
             // For the remainder of "why" see the 4.14 comment below.
             gdk_disable.@"gles-api" = true;
-            gdk_disable.vulkan = true;
+            gdk_disable.vulkan = !want_vulkan;
             break :environment;
         }
         if (gtk_version.runtimeAtLeast(4, 14, 0)) {
@@ -2895,7 +2903,7 @@ fn setGtkEnv(config: *const CoreConfig) error{NoSpaceLeft}!void {
             //
             // Upstream issue: https://gitlab.gnome.org/GNOME/gtk/-/issues/6589
             gdk_debug.@"gl-disable-gles" = true;
-            gdk_debug.@"vulkan-disable" = true;
+            gdk_debug.@"vulkan-disable" = !want_vulkan;
 
             if (gtk_version.runtimeUntil(4, 17, 5)) {
                 // Removed at GTK v4.17.5
@@ -2907,7 +2915,7 @@ fn setGtkEnv(config: *const CoreConfig) error{NoSpaceLeft}!void {
         // Versions prior to 4.14 are a bit of an unknown for Ghostty. It
         // is an environment that isn't tested well and we don't have a
         // good understanding of what we may need to do.
-        gdk_debug.@"vulkan-disable" = true;
+        gdk_debug.@"vulkan-disable" = !want_vulkan;
     }
 
     {
