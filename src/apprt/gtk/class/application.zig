@@ -9,6 +9,10 @@ const gobject = @import("gobject");
 const gtk = @import("gtk");
 
 const build_config = @import("../../../build_config.zig");
+const vulkan_host = if (build_config.renderer == .vulkan)
+    @import("../vulkan/Host.zig")
+else
+    void;
 const build_info = @import("../build/info.zig");
 const state = &@import("../../../global.zig").state;
 const i18n = @import("../../../os/main.zig").i18n;
@@ -456,6 +460,13 @@ pub const Application = extern struct {
         priv.css_provider.unref();
         for (priv.custom_css_providers.items) |provider| provider.unref();
         priv.custom_css_providers.deinit(alloc);
+
+        // Tear down the process-wide Vulkan host last. We're past the
+        // main loop here, so every surface is finalized and its
+        // renderer thread (which borrows the host's VkDevice/Instance)
+        // is joined. No-op + idempotent if Vulkan was never brought up
+        // or deinit runs twice (terminate() then finalize()).
+        if (build_config.renderer == .vulkan) vulkan_host.deinit();
     }
 
     /// The global allocator that all other classes should use by

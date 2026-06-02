@@ -106,6 +106,31 @@ pub fn instance() ?*const Host {
     return if (host) |*h| h else null;
 }
 
+/// Destroy the process-wide Vulkan host. No-op if it was never
+/// brought up, and idempotent (safe if the app teardown path calls
+/// it more than once).
+///
+/// Ordering contract: call this only after every surface's renderer
+/// — which *borrows* these handles (see `pkg/vulkan/Device.zig`) —
+/// has been torn down. In the GTK apprt that means at app shutdown
+/// (`Application.deinit`), after the main loop has exited and all
+/// surfaces are finalized, so their renderer threads are joined. The
+/// `vkDeviceWaitIdle` below is a belt-and-braces drain of any GPU
+/// work that outlived the join; it does not substitute for the
+/// thread-join ordering above.
+pub fn deinit() void {
+    once_mutex.lock();
+    defer once_mutex.unlock();
+    const h = if (host) |*h| h else return;
+    _ = vk.vkDeviceWaitIdle(h.device_handle);
+    vk.vkDestroyDevice(h.device_handle, null);
+    vk.vkDestroyInstance(h.instance_handle, null);
+    host = null;
+    // `once_done` stays true: re-initializing after shutdown is
+    // unsupported, and leaving it set makes any late `instance()`
+    // call return null rather than racing a fresh bring-up.
+}
+
 const Error = error{
     InstanceCreateFailed,
     NoPhysicalDevices,
