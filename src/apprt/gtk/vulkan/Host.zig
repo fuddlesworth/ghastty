@@ -430,11 +430,12 @@ fn cbGetSupportedModifiers(
 ///     alive — when our dup'd fd is closed (via the destroy
 ///     notify on the texture), the memory is freed.
 ///   - `image_backed` is true when the dmabuf was exported from a
-///     VkImage (importable as a 2D image). When false it came
-///     from a VkBuffer fallback (NVIDIA, no COLOR_ATTACHMENT for
-///     LINEAR modifier) and is only usable via mmap + CPU
-///     readback — `linux-dmabuf-v1` import would error. We skip
-///     those frames; the CPU-readback path is a later concern.
+///     VkImage (importable as a 2D image), which is the path this
+///     function handles. When false it came from a VkBuffer fallback
+///     (NVIDIA, no COLOR_ATTACHMENT for the LINEAR modifier) that
+///     can't be imported as a GdkDmabufTexture; `cbPresent` routes
+///     those to `presentLegacyCopy` (mmap + GdkMemoryTexture) before
+///     ever reaching here.
 ///
 /// Threading: called from libghostty's renderer thread.
 /// `GdkDmabufTextureBuilder.build` has no documented thread

@@ -841,15 +841,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // Load our custom shaders.
             //
             // GraphicsAPI advertises whether it can actually run them
-            // (`supports_custom_shaders`). The Vulkan backend currently
-            // can't — its post-pass / compositor pipeline that wires
-            // CustomShaderState.back_texture → frame.target through the
-            // user's shader hasn't been built yet. Loading + flagging
-            // `has_custom_shaders` anyway would route bg_color into the
-            // back_texture and leave frame.target blank. Skip the load
-            // when the backend can't consume the result, and emit a
-            // one-line warning so the user knows their config item was
-            // ignored.
+            // (`supports_custom_shaders`). A backend that can't — one
+            // whose post-pass / compositor pipeline wiring
+            // CustomShaderState.back_texture → frame.target isn't built —
+            // would, if we loaded + flagged `has_custom_shaders` anyway,
+            // route bg_color into the back_texture and leave frame.target
+            // blank. Skip the load when the backend can't consume the
+            // result, and emit a one-line warning so the user knows their
+            // config item was ignored.
             const can_use_custom = !@hasDecl(GraphicsAPI, "supports_custom_shaders") or
                 GraphicsAPI.supports_custom_shaders;
             const custom_shaders: []const []const u8 = if (can_use_custom)
@@ -878,8 +877,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             else custom: {
                 if (self.config.custom_shaders.value.items.len > 0) {
                     log.warn(
-                        "custom-shader config ignored: backend lacks " ++
-                            "post-pipeline support (Vulkan TODO)",
+                        "custom-shader config ignored: this renderer " ++
+                            "backend lacks post-pipeline support",
                         .{},
                     );
                 }
