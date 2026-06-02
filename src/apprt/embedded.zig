@@ -403,62 +403,12 @@ pub const Platform = union(PlatformTag) {
     /// the host as dmabuf file descriptors so the host can sample
     /// them without a CPU readback.
     ///
-    /// Handles are `?*anyopaque` here so callers don't need Vulkan
-    /// headers to compile against the C API; treat them as VkInstance,
-    /// VkPhysicalDevice, VkDevice, VkQueue respectively.
-    pub const Vulkan = struct {
-        userdata: ?*anyopaque,
-
-        /// Resolve `vkGetInstanceProcAddr` (returned as `?*anyopaque`).
-        /// libghostty bootstraps the rest of the Vulkan loader from it.
-        get_instance_proc_addr: *const fn (
-            ?*anyopaque,
-            [*:0]const u8,
-        ) callconv(.c) ?*anyopaque,
-
-        /// Host-owned Vulkan handles. libghostty does not destroy
-        /// these.
-        instance: *const fn (?*anyopaque) callconv(.c) ?*anyopaque,
-        physical_device: *const fn (?*anyopaque) callconv(.c) ?*anyopaque,
-        device: *const fn (?*anyopaque) callconv(.c) ?*anyopaque,
-        queue: *const fn (?*anyopaque) callconv(.c) ?*anyopaque,
-        queue_family_index: *const fn (?*anyopaque) callconv(.c) u32,
-
-        /// Query the compositor-supported DRM modifiers for a given
-        /// DRM_FORMAT_* fourcc. Two-pass usage: call with
-        /// `out=null, capacity=0` for the count, then again with a
-        /// buffer of that size. Returns the number of modifiers
-        /// actually written. The renderer intersects this with the
-        /// GPU's per-modifier feature set to pick a tiling the
-        /// compositor will accept on attach.
-        get_supported_modifiers: *const fn (
-            ?*anyopaque,
-            u32, // DRM_FORMAT_*
-            ?[*]u64, // out
-            usize, // capacity
-        ) callconv(.c) usize,
-
-        /// Hand off a rendered frame to the host as a dmabuf fd. The
-        /// host imports it for composition; libghostty retains
-        /// ownership of the underlying VkDeviceMemory and the fd is
-        /// valid only for the duration of the call (host must `dup()`
-        /// if it needs to hold the fd longer). `image_backed` tells
-        /// the host whether the fd was exported from a VkImage
-        /// (directly importable as a 2D image via linux-dmabuf-v1)
-        /// or from a VkBuffer (only usable via mmap + CPU readback);
-        /// see `vulkan/Target.zig` and `include/ghostty.h` for the
-        /// full rationale.
-        present: *const fn (
-            ?*anyopaque,
-            i32, // dmabuf fd
-            u32, // DRM_FORMAT_*
-            u64, // DRM modifier
-            u32, // width (pixels)
-            u32, // height (pixels)
-            u32, // stride (bytes)
-            bool, // image_backed
-        ) callconv(.c) void,
-    };
+    /// The actual struct lives in `apprt/platform.zig` so non-embedded
+    /// apprts (the GTK Vulkan path) can construct the same shape
+    /// without depending on the libghostty C ABI plumbing in this
+    /// file. Aliased here to keep the `apprt.embedded.Platform.Vulkan`
+    /// path that the renderer and existing call sites use.
+    pub const Vulkan = apprt.platform.VulkanPlatform;
 
     // The C ABI compatible version of this union. The tag is expected
     // to be stored elsewhere.

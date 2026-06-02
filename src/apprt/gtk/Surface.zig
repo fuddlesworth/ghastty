@@ -1,6 +1,7 @@
 const Self = @This();
 
 const std = @import("std");
+const build_config = @import("../../build_config.zig");
 const apprt = @import("../../apprt.zig");
 const configpkg = @import("../../config.zig");
 const CoreSurface = @import("../../Surface.zig");
@@ -8,8 +9,25 @@ const ApprtApp = @import("App.zig");
 const Application = @import("class/application.zig").Application;
 const Surface = @import("class/surface.zig").Surface;
 
+/// Per-surface Vulkan platform descriptor type. Only meaningful on
+/// `-Drenderer=vulkan` builds; the renderer reads `rt_surface.platform`
+/// to fetch host handles and the `present` callback. On non-Vulkan
+/// builds this collapses to `void` so we don't pay a per-surface cost
+/// for unused function-pointer storage.
+///
+/// Phase 1 caveat: the field is declared but no GTK code path
+/// constructs a value yet — `src/apprt/gtk/vulkan/Host.zig` will
+/// populate it once the surface integration lands. A `-Drenderer=vulkan
+/// -Dapp-runtime=gtk` build that actually exercises a surface will
+/// crash on first use until that work lands.
+pub const Platform = if (build_config.renderer == .vulkan)
+    apprt.platform.VulkanPlatform
+else
+    void;
+
 /// The GObject Surface
 surface: *Surface,
+platform: Platform = if (Platform == void) {} else undefined,
 
 pub fn deinit(self: *Self) void {
     _ = self;

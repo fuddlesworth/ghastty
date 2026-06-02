@@ -93,7 +93,7 @@ pub const Options = struct {
     /// `present()` reaches the right window — and `pickModifier`
     /// asks the right host (compositor and host can in principle
     /// differ across surfaces, e.g. mixed-DPI multi-screen).
-    platform: apprt.embedded.Platform.Vulkan,
+    platform: apprt.platform.VulkanPlatform,
 };
 
 pub const Error = error{
@@ -105,7 +105,7 @@ pub const Error = error{
 device: *const Device,
 
 /// Per-surface platform — see `Options.platform`.
-platform: apprt.embedded.Platform.Vulkan,
+platform: apprt.platform.VulkanPlatform,
 
 /// Which present strategy this target uses. Decides whether
 /// `recordPresentBarrier` emits a copy.
@@ -185,7 +185,7 @@ pub fn init(opts: Options) Error!Self {
 ///     COLOR_ATTACHMENT for every modifier).
 fn pickModifier(
     dev: *const Device,
-    platform: apprt.embedded.Platform.Vulkan,
+    platform: apprt.platform.VulkanPlatform,
     format: vk.VkFormat,
     drm_format: u32,
     required_features: vk.VkFormatFeatureFlags,

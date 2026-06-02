@@ -18,6 +18,7 @@ pub const gtk = @import("apprt/gtk.zig");
 pub const none = @import("apprt/none.zig");
 pub const browser = @import("apprt/browser.zig");
 pub const embedded = @import("apprt/embedded.zig");
+pub const platform = @import("apprt/platform.zig");
 pub const surface = @import("apprt/surface.zig");
 
 pub const Action = action.Action;

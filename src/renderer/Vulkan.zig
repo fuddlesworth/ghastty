@@ -175,33 +175,13 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !Vulkan {
     device_mutex.lock();
     defer device_mutex.unlock();
     if (device == null) {
-        switch (apprt.runtime) {
-            // The Vulkan renderer is embedded-only by design: the
-            // host owns the VkInstance/Device/Queue and hands them
-            // to libghostty via `ghostty_platform_vulkan_s`. There
-            // is no Vulkan path through the GTK apprt and never
-            // will be from this side. Compile-error any other
-            // runtime so a misconfigured `-Drenderer=vulkan
-            // -Dapp-runtime=gtk` build fails loudly at compile time
-            // instead of crashing at first surface init. Mirrors
-            // OpenGL.zig's `@compileError("unsupported app
-            // runtime for OpenGL")` pattern.
-            else => @compileError("unsupported app runtime for Vulkan (embedded-only)"),
-            apprt.embedded => switch (opts.rt_surface.platform) {
-                .vulkan => |platform| {
-                    device = try Device.init(alloc, try bootstrapFromPlatform(platform));
-                    log.info(
-                        "Vulkan device ready (api=0x{x})",
-                        .{device.?.api_version},
-                    );
-                },
-                // The Platform union is decided at host-call time
-                // (the C ABI lets the host pick), so this arm
-                // really is a runtime check — the host plugged us
-                // into a non-Vulkan surface.
-                .opengl, .macos, .ios => return error.UnsupportedPlatform,
-            },
-        }
+        const platform = surfacePlatform(opts.rt_surface) orelse
+            return error.UnsupportedPlatform;
+        device = try Device.init(alloc, try bootstrapFromPlatform(platform));
+        log.info(
+            "Vulkan device ready (api=0x{x})",
+            .{device.?.api_version},
+        );
     }
     device_refcount += 1;
     return .{
@@ -369,13 +349,13 @@ pub fn initTarget(self: *const Vulkan, width: usize, height: usize) !Target {
     });
 }
 
-/// Translate the apprt's `Platform.Vulkan` callback struct into the
+/// Translate the apprt's `VulkanPlatform` callback struct into the
 /// neutral `Device.HostBootstrap` the binding expects. Resolves the
 /// host's handles + the root proc-addr resolver up-front so the
 /// binding stays free of any apprt type. Any null host handle ->
 /// `error.HostHandleMissing`.
 fn bootstrapFromPlatform(
-    platform: apprt.embedded.Platform.Vulkan,
+    platform: apprt.platform.VulkanPlatform,
 ) Device.Error!Device.HostBootstrap {
     const instance_handle = platform.instance(platform.userdata) orelse
         return error.HostHandleMissing;
@@ -400,28 +380,41 @@ fn bootstrapFromPlatform(
     };
 }
 
-/// Extract the Vulkan platform callbacks from a surface, when the
-/// surface was created with the Vulkan platform tag. Returns null
-/// when the surface was tagged with a non-Vulkan platform — the
-/// caller is expected to reject the surface with
-/// `error.UnsupportedPlatform`. (`Vulkan.init` already does the same
-/// reject up-front, so reaching this function with a non-Vulkan
-/// platform implies a surface plumbed through after that gate.)
-fn surfacePlatform(rt_surface: *apprt.Surface) ?apprt.embedded.Platform.Vulkan {
-    // `init()` already gates non-embedded runtimes with a
-    // `@compileError`, so reaching this function on anything other
-    // than `apprt.embedded` is impossible. Direct embedded match
-    // here keeps the function single-arm.
-    if (apprt.runtime != apprt.embedded)
-        @compileError("unsupported app runtime for Vulkan (embedded-only)");
-    return switch (rt_surface.platform) {
-        .vulkan => |p| p,
-        else => null,
+/// Extract the Vulkan platform callbacks from a surface. Shape
+/// differs per apprt:
+///   - embedded: `rt_surface.platform` is a tagged union; the host
+///     picks at C-API call time, so non-`.vulkan` tags are a
+///     runtime error.
+///   - gtk: `rt_surface.platform` is a single struct (the GTK apprt
+///     only constructs Vulkan platforms when `-Drenderer=vulkan`),
+///     so the value is always present.
+/// Returns null only on the embedded mismatch case; GTK callers
+/// always get the platform.
+fn surfacePlatform(rt_surface: *apprt.Surface) ?apprt.platform.VulkanPlatform {
+    return switch (apprt.runtime) {
+        else => @compileError("unsupported app runtime for Vulkan"),
+        apprt.embedded => switch (rt_surface.platform) {
+            .vulkan => |p| p,
+            // The Platform union is decided at host-call time
+            // (the C ABI lets the host pick), so this arm really
+            // is a runtime check — the host plugged us into a
+            // non-Vulkan surface.
+            .opengl, .macos, .ios => null,
+        },
+        apprt.gtk => rt_surface.platform,
     };
 }
 
 pub fn surfaceSize(self: *const Vulkan) !struct { width: u32, height: u32 } {
-    const size = self.rt_surface.size;
+    const size = switch (apprt.runtime) {
+        else => @compileError("unsupported app runtime for Vulkan"),
+        apprt.embedded => self.rt_surface.size,
+        // GTK exposes the size via a method on the underlying GObject
+        // surface, not a field on the apprt wrapper. Mirrors how
+        // `OpenGL.surfaceSize` reads from the GL viewport on GTK
+        // rather than `rt_surface.size`.
+        apprt.gtk => try self.rt_surface.getSize(),
+    };
     return .{ .width = size.width, .height = size.height };
 }
 
