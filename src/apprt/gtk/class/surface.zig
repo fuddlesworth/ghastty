@@ -23,6 +23,10 @@ const ext = @import("../ext.zig");
 const gsettings = @import("../gsettings.zig");
 const gtk_key = @import("../key.zig");
 const ApprtSurface = @import("../Surface.zig");
+const vulkan_host = if (build_config.renderer == .vulkan)
+    @import("../vulkan/Host.zig")
+else
+    void;
 const Common = @import("../class.zig").Common;
 const Application = @import("application.zig").Application;
 const Config = @import("config.zig").Config;
@@ -1790,7 +1794,17 @@ pub const Surface = extern struct {
         const priv = self.private();
 
         // Initialize some private fields so they aren't undefined
-        priv.rt_surface = .{ .surface = self };
+        priv.rt_surface = if (build_config.renderer == .vulkan) .{
+            .surface = self,
+            // Per-surface Vulkan platform descriptor. `userdata` is
+            // the GObject Surface — phase 3 will use it from
+            // `cbPresent` to route the dmabuf to the right widget.
+            // Phase 2: the present callback discards the fd, so the
+            // userdata is set but unread.
+            .platform = vulkan_host.asPlatform(self),
+        } else .{
+            .surface = self,
+        };
         priv.precision_scroll = false;
         priv.cursor_pos = .{ .x = 0, .y = 0 };
         priv.mouse_shape = .text;

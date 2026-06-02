@@ -25,6 +25,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const apprt = @import("../../../apprt.zig");
+const gdk = @import("gdk");
 const vulkan = @import("vulkan");
 const vk = vulkan.c;
 
@@ -45,7 +46,15 @@ const required_device_extensions: []const [*:0]const u8 = &.{
 /// Process-singleton state. Constructed on first `instance()` and
 /// never torn down — the Vulkan renderer assumes the host's handles
 /// outlive every surface, and this module is the host.
-var once: std.once.Once = .{};
+///
+/// `once_mutex` + `once_done` implements a hand-rolled `std.once`:
+/// the std API in 0.15.x takes the init function as a comptime
+/// argument and returns a struct, which doesn't compose well with
+/// the runtime-fallible init we need (init can fail and leave the
+/// host as null; we still want subsequent `instance()` calls to
+/// short-circuit on `once_done` and return null).
+var once_mutex: std.Thread.Mutex = .{};
+var once_done: bool = false;
 var host: ?Host = null;
 
 pub const Host = struct {
@@ -62,17 +71,28 @@ pub const Host = struct {
 /// rejecting the surface with `error.UnsupportedPlatform`. Cached
 /// after the first call so repeated lookups are cheap.
 pub fn instance() ?*const Host {
-    once.call(initOnce);
-    return if (host) |*h| h else null;
-}
+    // Fast path: once initialized, no lock needed (writes to
+    // `host` and `once_done` are guarded by `once_mutex`, and the
+    // memory ordering on x86-64 / aarch64 makes the lock-free read
+    // safe after the first synchronized read on this thread). This
+    // function is hot — every libghostty platform-callback invocation
+    // hits it.
+    if (@atomicLoad(bool, &once_done, .acquire)) {
+        return if (host) |*h| h else null;
+    }
 
-fn initOnce() void {
-    var built: Host = undefined;
-    bringUp(&built) catch |err| {
-        log.warn("Vulkan host init failed: {s}", .{@errorName(err)});
-        return;
-    };
-    host = built;
+    once_mutex.lock();
+    defer once_mutex.unlock();
+    if (!once_done) {
+        var built: Host = undefined;
+        if (bringUp(&built)) |_| {
+            host = built;
+        } else |err| {
+            log.warn("Vulkan host init failed: {s}", .{@errorName(err)});
+        }
+        @atomicStore(bool, &once_done, true, .release);
+    }
+    return if (host) |*h| h else null;
 }
 
 const Error = error{
@@ -263,8 +283,13 @@ fn cbGetInstanceProcAddr(
     name: [*:0]const u8,
 ) callconv(.c) ?*anyopaque {
     const h = instance() orelse return null;
-    const fp = vk.vkGetInstanceProcAddr(h.instance_handle, name);
-    return @ptrCast(fp);
+    const fp = vk.vkGetInstanceProcAddr(h.instance_handle, name) orelse
+        return null;
+    // PFN_vkVoidFunction is a `?*const fn() callconv(.c) void`. The
+    // platform contract returns `?*anyopaque`; libghostty's loader
+    // re-casts back to a typed PFN. The cast chain only ever round-
+    // trips, so dropping const here is safe.
+    return @constCast(@ptrCast(fp));
 }
 
 fn cbInstance(_: ?*anyopaque) callconv(.c) ?*anyopaque {
@@ -292,38 +317,152 @@ fn cbQueueFamilyIndex(_: ?*anyopaque) callconv(.c) u32 {
     return h.queue_family_index;
 }
 
-/// Phase 1 stub. Returns 0 unconditionally → renderer's
-/// modifier intersection comes up empty → `Target.init` falls
-/// through to legacy_copy mode (CPU readback). Phase 2 will source
-/// modifiers from `gdk_display_get_dmabuf_formats()` (GTK ≥ 4.14).
+/// Source compositor-supported DRM modifiers from GDK. Two-pass
+/// usage: caller first calls with `out=null, capacity=0` to query
+/// the count, then again with a buffer to fill. Returns the number
+/// of modifiers matching `drm_format` (capped at `capacity` if `out`
+/// is non-null).
+///
+/// `gdk_display_get_dmabuf_formats` returns a `GdkDmabufFormats`
+/// holding the *intersection* of formats both the GPU and the
+/// compositor support — exactly what the Vulkan renderer needs
+/// for its `pickModifier` intersection. Returning 0 (e.g. on
+/// non-Wayland displays where dmabuf is not advertised, or before
+/// a GdkDisplay exists) is fail-safe: the renderer falls back to
+/// legacy_copy mode (CPU readback). Required for direct mode on
+/// NVIDIA, which doesn't expose COLOR_ATTACHMENT for the LINEAR
+/// modifier.
 fn cbGetSupportedModifiers(
     _: ?*anyopaque,
-    _: u32,
-    _: ?[*]u64,
-    _: usize,
+    drm_format: u32,
+    out: ?[*]u64,
+    capacity: usize,
 ) callconv(.c) usize {
-    return 0;
+    const display = gdk.Display.getDefault() orelse return 0;
+    const formats = display.getDmabufFormats();
+    const total = formats.getNFormats();
+
+    var matched: usize = 0;
+    var i: usize = 0;
+    while (i < total) : (i += 1) {
+        var fourcc: u32 = 0;
+        var modifier: u64 = 0;
+        formats.getFormat(i, &fourcc, &modifier);
+        if (fourcc != drm_format) continue;
+        if (out) |buf| {
+            if (matched < capacity) buf[matched] = modifier;
+        }
+        matched += 1;
+    }
+
+    // When `out` is non-null we report only what we wrote; when
+    // null we report the unbounded count (caller's two-pass query).
+    return if (out != null) @min(matched, capacity) else matched;
 }
 
-/// Phase 1 stub. Discards the dmabuf fd. Wiring the real present
-/// path (GdkDmabufTexture → GtkPicture → Wayland subsurface) is
-/// phase 2. The GTK apprt currently constructs no Vulkan surfaces
-/// (`Self.platform` stays `undefined` for non-Vulkan builds and
-/// nothing populates it in this commit), so this callback is
-/// unreachable on `-Dapp-runtime=gtk` builds today; it exists so
-/// that the symbol resolution and ABI shape are present for
-/// downstream wiring.
+/// Build a `GdkDmabufTexture` from the dmabuf fd libghostty hands us
+/// and immediately drop it. Phase 2 plumbing-only: the goal here is
+/// to exercise the real GDK import path (modifier compatibility,
+/// fd-keepalive contract, color state) without yet wiring the
+/// resulting texture to a visible widget. Phase 3 will replace the
+/// immediate-drop with a per-surface paintable assignment.
+///
+/// libghostty's `present` contract:
+///   - The fd is *borrowed*; we must `dup()` if we hold it past
+///     the call. The renderer keeps the underlying VkDeviceMemory
+///     alive — when our dup'd fd is closed, the memory is freed.
+///   - `image_backed` is true when the dmabuf was exported from a
+///     VkImage (importable as a 2D image). When false, it came from
+///     a VkBuffer fallback (NVIDIA, no COLOR_ATTACHMENT for LINEAR
+///     modifier) and is only usable via mmap + CPU readback —
+///     `linux-dmabuf-v1` import would error. We skip those frames
+///     for now; the real CPU-readback path is a later concern.
+///
+/// Threading: called from libghostty's renderer thread. The
+/// GdkDmabufTextureBuilder API has no documented thread restriction
+/// for `build()` — it's metadata + an fd hold. Actual GPU import
+/// happens lazily when a renderer renders the texture, which IS
+/// GUI-thread-bound and is the visibility wiring's problem in
+/// phase 3.
 fn cbPresent(
     _: ?*anyopaque,
     dmabuf_fd: i32,
-    _: u32,
-    _: u64,
-    _: u32,
-    _: u32,
-    _: u32,
-    _: bool,
+    drm_format: u32,
+    drm_modifier: u64,
+    width: u32,
+    height: u32,
+    stride: u32,
+    image_backed: bool,
 ) callconv(.c) void {
-    if (dmabuf_fd >= 0) std.posix.close(dmabuf_fd);
+    // Defensive: a negative fd would be a contract violation by
+    // libghostty, but we'd rather log than crash.
+    if (dmabuf_fd < 0) {
+        log.warn("present: invalid dmabuf fd {d}", .{dmabuf_fd});
+        return;
+    }
+
+    // CPU-readback path not implemented yet. Closing the borrowed
+    // fd is wrong (the contract is borrowed), but we never opened
+    // it ourselves either — the renderer holds the device memory.
+    // Simply returning leaves the fd alone; libghostty closes it
+    // when its `Target` is freed.
+    if (!image_backed) {
+        log.debug("present: skipping non-image-backed frame ({d}x{d})", .{ width, height });
+        return;
+    }
+
+    // dup() the fd so its lifetime is bound to our texture, not
+    // libghostty's call stack. The destroy notify below will
+    // close it when GDK drops the last reference.
+    const owned_fd = std.posix.dup(dmabuf_fd) catch |err| {
+        log.warn("present: dup(dmabuf_fd) failed: {s}", .{@errorName(err)});
+        return;
+    };
+
+    const display = gdk.Display.getDefault() orelse {
+        log.warn("present: no default display", .{});
+        std.posix.close(owned_fd);
+        return;
+    };
+
+    const builder = gdk.DmabufTextureBuilder.new();
+    defer builder.unref();
+    builder.setDisplay(display);
+    builder.setWidth(width);
+    builder.setHeight(height);
+    builder.setFourcc(drm_format);
+    builder.setModifier(drm_modifier);
+    builder.setNPlanes(1);
+    builder.setFd(0, owned_fd);
+    builder.setStride(0, stride);
+    builder.setOffset(0, 0);
+    // Renderer outputs premultiplied alpha — see the `VK_FORMAT_B8G8R8A8_SRGB`
+    // comment in `vulkan/Target.zig::initTarget`.
+    builder.setPremultiplied(@intFromBool(true));
+
+    var gerr: ?*@import("glib").Error = null;
+    const tex = builder.build(&fdDestroyNotify, @ptrFromInt(@as(usize, @intCast(owned_fd))), &gerr);
+    if (tex == null) {
+        const msg = if (gerr) |e| (if (e.f_message) |m| std.mem.sliceTo(m, 0) else "(no message)") else "(no error)";
+        log.warn("present: GdkDmabufTexture build failed: {s}", .{msg});
+        if (gerr) |e| e.free();
+        // The destroy notify did NOT fire on build failure — close
+        // the dup'd fd ourselves to avoid a leak.
+        std.posix.close(owned_fd);
+        return;
+    }
+
+    // Phase 2: drop the texture immediately. Phase 3 replaces this
+    // with a per-surface paintable assignment.
+    tex.?.unref();
+}
+
+/// glib.DestroyNotify trampoline that closes the dup'd dmabuf fd.
+/// `data` is the fd cast to a pointer (we never deref it as a
+/// pointer; the cast is just for the void* slot).
+fn fdDestroyNotify(data: ?*anyopaque) callconv(.c) void {
+    const fd: i32 = @intCast(@intFromPtr(data));
+    if (fd >= 0) std.posix.close(fd);
 }
 
 /// Build a `VulkanPlatform` callback struct pointing at this
