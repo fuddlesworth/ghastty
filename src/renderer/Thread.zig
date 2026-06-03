@@ -217,7 +217,7 @@ fn threadMain_(self: *Thread) !void {
     // Setup our crash metadata
     crash.sentry.thread_state = .{
         .type = .renderer,
-        .surface = self.renderer.surface_mailbox.surface,
+        .surface = self.renderer.surfaceMailbox().surface,
     };
     defer crash.sentry.thread_state = null;
 
@@ -483,17 +483,17 @@ fn drainMailbox(self: *Thread) !void {
             .search_viewport_matches => |v| {
                 // Note we don't free the new value because we expect our
                 // allocators to match.
-                if (self.renderer.search_matches) |*m| m.arena.deinit();
-                self.renderer.search_matches = v;
-                self.renderer.search_matches_dirty = true;
+                if (self.renderer.searchMatchesPtr().*) |*m| m.arena.deinit();
+                self.renderer.searchMatchesPtr().* = v;
+                self.renderer.searchMatchesDirtyPtr().* = true;
             },
 
             .search_selected_match => |v| {
                 // Note we don't free the new value because we expect our
                 // allocators to match.
-                if (self.renderer.search_selected_match) |*m| m.arena.deinit();
-                self.renderer.search_selected_match = v;
-                self.renderer.search_matches_dirty = true;
+                if (self.renderer.searchSelectedMatchPtr().*) |*m| m.arena.deinit();
+                self.renderer.searchSelectedMatchPtr().* = v;
+                self.renderer.searchMatchesDirtyPtr().* = true;
             },
 
             .inspector => |v| {

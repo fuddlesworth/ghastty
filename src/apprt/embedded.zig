@@ -2431,7 +2431,7 @@ pub const CAPI = struct {
             // Get the shared font grid. We acquire a read lock to
             // read the font face. It should not be deferred since
             // we're loading the primary face.
-            const grid = ptr.core_surface.renderer.font_grid;
+            const grid = ptr.core_surface.renderer.fontGrid();
             grid.lock.lockShared();
             defer grid.lock.unlockShared();
 
