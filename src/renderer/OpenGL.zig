@@ -93,12 +93,14 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) error{}!OpenGL {
 }
 
 pub fn deinit(self: *OpenGL) void {
-    // The dmabuf ring's GL objects are normally freed in
-    // `displayUnrealized` (GTK), while the context is still current.
-    // This is the safety net for paths that never unrealize (e.g. the
-    // embedded host): the fd close is always safe; any GL handles freed
-    // without a current context are reclaimed when the context is
-    // destroyed anyway.
+    // The dmabuf ring's GL objects are freed in `displayUnrealized` (GTK)
+    // while the context is still current. By the time `deinit` runs the
+    // ring is already empty in practice: the dmabuf-export path only
+    // populates it on GTK, and there the GLArea always unrealizes before
+    // teardown; the embedded host never populates it at all. This call is
+    // therefore a no-op safety net that, in the normal case, issues no GL
+    // calls without a current context. (If a slot somehow survived, its
+    // fd close is always safe.)
     self.freeDmabufRing();
     self.* = undefined;
 }

@@ -263,7 +263,11 @@ pub const ImguiWidget = extern struct {
     /// Handle a request to unrealize the GLArea
     fn glAreaUnrealize(_: *gtk.GLArea, self: *ImguiWidget) callconv(.c) void {
         const priv = self.private();
-        assert(priv.ig_context != null);
+        // If glAreaRealize bailed before creating the ImGui context (e.g. the
+        // GLArea failed to realize or glad failed to load), there is nothing
+        // to tear down. Returning also avoids passing null to
+        // ImGui_DestroyContext below.
+        const ig_context = priv.ig_context orelse return;
 
         // Remove the tick callback if it was registered.
         if (priv.tick_callback_id != 0) {
@@ -281,7 +285,7 @@ pub const ImguiWidget = extern struct {
 
         self.setCurrentContext() catch return;
         cimgui.ImGui_ImplOpenGL3_ShutdownWithLoaderCleanup();
-        cimgui.c.ImGui_DestroyContext(priv.ig_context);
+        cimgui.c.ImGui_DestroyContext(ig_context);
         priv.ig_context = null;
     }
 

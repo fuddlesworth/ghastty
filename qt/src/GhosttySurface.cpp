@@ -271,7 +271,7 @@ GhosttySurface::GhosttySurface(ghostty_app_t app, MainWindow *owner,
   // path, so skip the setup. The Vulkan renderer handles alpha
   // pre-multiplication itself (or doesn't need to — the dmabuf
   // contents are already in the host's expected order).
-  if (!m_useVulkan && m_owner->needsPremultiply()) initPremultiply();
+  if (!m_useVulkan && m_owner && m_owner->needsPremultiply()) initPremultiply();
 
   // (No first-frame ctor gate — every variant we've tried so
   // far either captures a wrong-size frame and lets wp_viewport

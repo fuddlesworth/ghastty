@@ -8,7 +8,6 @@ const glslang = @import("glslang");
 const harfbuzz = @import("harfbuzz");
 const oni = @import("oniguruma");
 const crash = @import("crash/main.zig");
-const renderer = @import("renderer.zig");
 const apprt = @import("apprt.zig");
 
 /// We export the xev backend we want to use so that the rest of
@@ -136,7 +135,7 @@ pub const GlobalState = struct {
         if (comptime build_config.font_backend.hasFontconfig()) {
             std.log.info("dependency fontconfig={d}", .{fontconfig.version()});
         }
-        std.log.info("renderer={}", .{renderer.Renderer});
+        std.log.info("renderer={t}", .{build_config.renderer});
         std.log.info("libxev default backend={t}", .{xev.backend});
 
         // As early as possible, initialize our resource limits.
