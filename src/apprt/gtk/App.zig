@@ -14,7 +14,6 @@ const Application = @import("class/application.zig").Application;
 const Surface = @import("Surface.zig");
 const ipcNewWindow = @import("ipc/new_window.zig").newWindow;
 const ipcToggleQuickTerminal = @import("ipc/toggle_quick_terminal.zig").toggleQuickTerminal;
-const build_config = @import("../../build_config.zig");
 const rendererpkg = @import("../../renderer.zig");
 
 const log = std.log.scoped(.gtk);

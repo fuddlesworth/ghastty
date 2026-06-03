@@ -16,7 +16,6 @@ const build_options = @import("build_options");
 const apprt = @import("../../../apprt.zig");
 const gdk = @import("gdk");
 const gobject = @import("gobject");
-const glib = @import("glib");
 const DmabufPaintable = @import("../DmabufPaintable.zig").DmabufPaintable;
 
 const gdk_wayland = if (build_options.wayland) @import("gdk_wayland") else struct {};
