@@ -2870,10 +2870,6 @@ const Action = struct {
     }
 };
 
-/// This sets various GTK-related environment variables as necessary
-/// given the runtime environment or configuration.
-///
-/// This must be called BEFORE GTK initialization.
 /// Pick the renderer backend from the `renderer` config, honoring only
 /// backends compiled into this build and probing Vulkan availability for
 /// `auto`/`vulkan` (with OpenGL fallback). Called once at startup before
@@ -2904,6 +2900,10 @@ fn vulkanUsable() bool {
         false;
 }
 
+/// This sets various GTK-related environment variables as necessary
+/// given the runtime environment or configuration.
+///
+/// This must be called BEFORE GTK initialization.
 fn setGtkEnv(config: *const CoreConfig) error{NoSpaceLeft}!void {
     assert(gtk.isInitialized() == 0);
 

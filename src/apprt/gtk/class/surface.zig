@@ -685,17 +685,20 @@ pub const Surface = extern struct {
         /// its main child in `init`.
         render_overlay: *gtk.Overlay,
 
-        /// Sibling Picture widget that hosts the Vulkan renderer's
-        /// dmabuf output. Always present in the template; only
-        /// assigned a paintable on `-Drenderer=vulkan` builds. On
-        /// OpenGL builds it stays empty and the render widget (below
-        /// it in the inner Overlay) covers it.
+        /// Sibling Picture widget that hosts the renderer's dmabuf
+        /// output. Always present in the template; assigned a paintable
+        /// on the dmabuf present modes (Vulkan, or OpenGL with EGL dmabuf
+        /// export). On the GtkGLArea OpenGL fallback it stays empty and
+        /// the render widget (below it in the inner Overlay) covers it.
         present_picture: *gtk.Picture,
 
         /// Per-surface DmabufPaintable backing `present_picture`. Present
         /// when the Vulkan backend is compiled in; `null` until the ctor
-        /// creates it (only when Vulkan is the active backend), and freed
-        /// in `dispose`. Collapses to `void` when Vulkan isn't compiled.
+        /// creates it (on the Vulkan or OpenGL-dmabuf present modes). It is
+        /// detached (`stop()`) in `dispose` but only freed in `finalize`,
+        /// after `core_surface.deinit()` joins the renderer thread that may
+        /// still `park` on it. Collapses to `void` when Vulkan isn't
+        /// compiled.
         dmabuf_paintable: if (vulkan_compiled)
             ?*DmabufPaintable
         else

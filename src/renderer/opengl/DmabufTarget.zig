@@ -106,8 +106,14 @@ pub fn init(
     // 3. Query the export layout: fourcc, plane count, modifier.
     var fourcc: c_int = 0;
     var num_planes: c_int = 0;
-    var modifier: u64 = 0;
-    if (dispatch.exportQuery(display, image, &fourcc, &num_planes, &modifier) != egl.TRUE) {
+    // EGL_MESA_image_dma_buf_export writes one modifier per plane into this
+    // array. We only support single-plane exports, but the driver fills
+    // `num_planes` entries *before* we can check the count, so size the
+    // buffer to the DRM plane maximum (4) to avoid a stack overflow if a
+    // driver reports a multi-plane layout. We read only plane 0's modifier,
+    // after validating num_planes == 1.
+    var modifiers = [_]u64{ 0, 0, 0, 0 };
+    if (dispatch.exportQuery(display, image, &fourcc, &num_planes, &modifiers[0]) != egl.TRUE) {
         log.warn("eglExportDMABUFImageQueryMESA failed", .{});
         return error.DmabufExportUnsupported;
     }
@@ -165,7 +171,7 @@ pub fn init(
         .framebuffer = fbo,
         .fd = fd,
         .drm_format = @bitCast(fourcc),
-        .drm_modifier = modifier,
+        .drm_modifier = modifiers[0],
         .stride = @intCast(stride),
         .width = width,
         .height = height,

@@ -74,8 +74,9 @@ pub fn compiledIn(comptime b: Backend) bool {
 /// apprt may override it at startup (e.g. GTK picks Vulkan or OpenGL
 /// based on config + Vulkan availability) via `setActiveBackend`.
 ///
-/// Written at most once, at startup before any surface/renderer exists,
-/// so no synchronization is needed.
+/// Written only during startup, before any surface/renderer exists (it may
+/// be set more than once there — e.g. from config and then overridden by
+/// `ghostty_set_renderer`), so no synchronization is needed.
 var active_backend: Backend = build_config.renderer;
 
 /// Override the process renderer backend. Must be called before any
