@@ -2149,29 +2149,20 @@ pub const Surface = extern struct {
             priv.pending_horizontal_scroll_reset = null;
         }
 
-        // Drop the strong ref on the dmabuf paintable. The Picture
-        // also held a ref (via setPaintable); when the Picture is
-        // disposed below it'll drop its ref too, and the paintable
-        // finalizes — which drops the texture, which drops the
-        // dup'd dmabuf fd.
+        // Detach the dmabuf paintable from present_picture while the
+        // Picture is still alive (before disposeTemplate below frees it),
+        // so no late tick/idle dereferences a freed widget. We do NOT
+        // drop our ref here: the Vulkan renderer thread can still call
+        // `present` → `park` on the paintable until the core surface is
+        // deinited (which joins that thread) in `finalize`. Dropping it
+        // now would let the paintable finalize during dispose (the
+        // Picture's own ref also goes, via disposeTemplate) and a frame
+        // parked in the dispose→finalize gap would hit freed memory. The
+        // paintable + GL-context unref is deferred to `finalize`, after
+        // the renderer thread is joined. `stop()` is idempotent across
+        // repeated dispose calls.
         if (vulkan_compiled) {
-            if (priv.dmabuf_paintable) |p| {
-                // Detach from present_picture (still alive here, before
-                // disposeTemplate frees it) so no late tick/idle touches a
-                // freed widget, then drop our ref. Null the field — GObject
-                // dispose may run more than once and a second unref would
-                // over-release (the Picture still holds its own ref).
-                p.stop();
-                p.as(gobject.Object).unref();
-                priv.dmabuf_paintable = null;
-            }
-
-            // Safety net: drop our OpenGL-dmabuf GdkGLContext if unrealize
-            // didn't already (e.g. disposed while unrealized).
-            if (priv.gl_context) |ctx| {
-                ctx.as(gobject.Object).unref();
-                priv.gl_context = null;
-            }
+            if (priv.dmabuf_paintable) |p| p.stop();
         }
 
         // This works around a GTK double-free bug where if you bind
@@ -2209,6 +2200,24 @@ pub const Surface = extern struct {
             alloc.destroy(v);
 
             priv.core_surface = null;
+        }
+
+        // Tear down render resources AFTER the core surface is deinited
+        // above (which joins the renderer thread). The Vulkan renderer
+        // thread parks frames on the `dmabuf_paintable` via the present
+        // callback until that join, so dropping the paintable any earlier
+        // (e.g. in dispose) is a use-after-free. Safe to run even if the
+        // core surface was never initialized (no thread → no parks).
+        // Unconditional unref + null; `dispose` left these alive.
+        if (vulkan_compiled) {
+            if (priv.dmabuf_paintable) |p| {
+                p.as(gobject.Object).unref();
+                priv.dmabuf_paintable = null;
+            }
+            if (priv.gl_context) |ctx| {
+                ctx.as(gobject.Object).unref();
+                priv.gl_context = null;
+            }
         }
         if (priv.mouse_hover_url) |v| {
             glib.free(@ptrCast(@constCast(v)));

@@ -8,8 +8,9 @@
 ///
 /// Initialize the overlay, apply features with `applyFeatures`, then
 /// get the resulting image with `pendingImage` to upload to the GPU.
-/// This works in concert with `renderer.image.State` to simplify. Draw
-/// it on the GPU as an image composited on top of the terminal output.
+/// This works in concert with `renderer.image.Pkg(GraphicsAPI).State`
+/// to simplify. Draw it on the GPU as an image composited on top of the
+/// terminal output.
 const Overlay = @This();
 
 const std = @import("std");

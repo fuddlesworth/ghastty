@@ -129,10 +129,9 @@ GhosttySurface::GhosttySurface(ghostty_app_t app, MainWindow *owner,
     // depend on which surface happens to be constructed first. Defaults
     // to "auto" if unreadable.
     QByteArray want = "auto";
-    {
+    if (ghostty_config_t cfg = GhosttyApp::instance().config()) {
       const char *r = nullptr;
-      if (ghostty_config_get(GhosttyApp::instance().config(), &r, "renderer",
-                             sizeof("renderer") - 1) &&
+      if (ghostty_config_get(cfg, &r, "renderer", sizeof("renderer") - 1) &&
           r != nullptr) {
         want = r;
       }

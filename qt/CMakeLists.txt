@@ -300,9 +300,8 @@ endif()
 #   actual zig-out artifact), and the .so's NEEDED entries also point
 #   into zig-out/lib for transitive deps.
 # - Installed: libghostty.so lives next to the binary ($ORIGIN/../lib).
-# Same layout regardless of variant — the binary name doesn't change,
-# the .so path doesn't change. Side-by-side installs of two variants
-# need separate `--prefix`es.
+# One runtime-selectable binary now (no compile-time variants): a single
+# `ghastty` + `libghostty.so` containing both backends.
 set_target_properties(ghastty PROPERTIES
   BUILD_RPATH "${GHOSTTY_LINK_DIR};${GHOSTTY_LIB_DIR}"
   INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}"
