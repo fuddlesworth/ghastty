@@ -782,8 +782,13 @@ bool GhosttySurface::event(QEvent *e) {
                 [this]() { onWaylandFrameReady(); });
             // Fresh presenter starts in "ready to present" state —
             // first present goes through immediately; subsequent
-            // presents wait for the frame callback.
-            m_compositorReady = true;
+            // presents wait for the frame callback. Take the mutex to
+            // match every other m_compositorReady access (safe here even
+            // pre-publication; keeps the invariant uniform).
+            {
+              std::lock_guard<std::mutex> lg(m_compositorMutex);
+              m_compositorReady = true;
+            }
             if (m_useVulkan) {
               m_useSubsurface.store(true, std::memory_order_release);
             } else {

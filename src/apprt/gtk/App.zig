@@ -24,13 +24,13 @@ const log = std.log.scoped(.gtk);
 /// because GTK's `GLArea` does not support drawing from a different thread.
 ///
 /// Vulkan renders into a dmabuf and hands frames back through a
-/// per-surface `DmabufPaintable`, which is thread-safe by design
-/// (atomic texture swap + `gdk.Paintable.invalidateContents` queues
-/// the GUI-thread redraw internally). The renderer thread can drive
-/// drawing directly. Runtime now that a build can contain both backends
-/// and the renderer is chosen at runtime: OpenGL must draw on the GUI
-/// thread (its GL context lives there), Vulkan draws on the renderer
-/// thread (presents via dmabuf).
+/// per-surface `DmabufPaintable`: the renderer thread only parks the
+/// frame (under a mutex), and a GUI-thread frame-clock tick builds the
+/// `GdkTexture` and calls `queueDraw` — so Vulkan can present from the
+/// renderer thread. A build can contain both backends with the renderer
+/// chosen at runtime: OpenGL must draw on the GUI thread (its GL context
+/// lives there), Vulkan draws on the renderer thread (presents via
+/// dmabuf).
 pub fn mustDrawFromAppThread() bool {
     return rendererpkg.activeBackend() == .opengl;
 }
