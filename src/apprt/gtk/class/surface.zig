@@ -706,9 +706,10 @@ pub const Surface = extern struct {
 
         /// Our own `GdkGLContext` for the OpenGL dmabuf-export path
         /// (that path has no GtkGLArea to manage one). Null on other
-        /// modes; created in `init`, dropped in `dispose`. Collapses to
-        /// `void` without Vulkan compiled (the path reuses the Vulkan
-        /// paintable).
+        /// modes; created at realize (`realizeOpenglContext`) and dropped
+        /// (unref + null) in `glareaUnrealize`, with `finalize` as a
+        /// safety net if unrealize never ran. Collapses to `void` without
+        /// Vulkan compiled (the path reuses the Vulkan paintable).
         gl_context: if (vulkan_compiled) ?*gdk.GLContext else void =
             if (vulkan_compiled) null else {},
 
