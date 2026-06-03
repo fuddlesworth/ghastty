@@ -303,7 +303,9 @@ pub const Application = extern struct {
         // for `auto`/`vulkan` it probes Vulkan availability and falls back
         // to OpenGL when Vulkan can't be brought up. No-op on builds with a
         // single compiled backend.
-        rendererpkg.setActiveBackend(selectBackend(&config));
+        const renderer_backend = selectBackend(&config);
+        rendererpkg.setActiveBackend(renderer_backend);
+        log.info("renderer backend selected backend={s}", .{@tagName(renderer_backend)});
 
         // Setup our GTK init env vars
         setGtkEnv(&config) catch |err| switch (err) {
