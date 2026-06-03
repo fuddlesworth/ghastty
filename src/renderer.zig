@@ -49,7 +49,10 @@ pub const lib = @import("lib/main.zig");
 /// other target / app-runtime keeps the single configured backend
 /// (`build_config.renderer`). This must stay in lockstep with the
 /// build-system's dep linking (`SharedDeps.rendererCompiled`).
-fn compiledIn(comptime b: Backend) bool {
+///
+/// The apprt uses this (comptime) to decide which render integrations to
+/// compile in; `activeBackend()` (runtime) decides which one to use.
+pub fn compiledIn(comptime b: Backend) bool {
     const t = builtin.target;
     if (build_config.app_runtime == .gtk and
         !t.os.tag.isDarwin() and
@@ -59,6 +62,27 @@ fn compiledIn(comptime b: Backend) bool {
         return b == .opengl or b == .vulkan;
     }
     return b == build_config.renderer;
+}
+
+/// The renderer backend selected for this process. Defaults to the
+/// configured backend; on builds that compile more than one backend the
+/// apprt may override it at startup (e.g. GTK picks Vulkan or OpenGL
+/// based on config + Vulkan availability) via `setActiveBackend`.
+///
+/// Written at most once, at startup before any surface/renderer exists,
+/// so no synchronization is needed.
+var active_backend: Backend = build_config.renderer;
+
+/// Override the process renderer backend. Must be called before any
+/// surface is created, and only with a backend that is `compiledIn`.
+pub fn setActiveBackend(b: Backend) void {
+    active_backend = b;
+}
+
+/// The renderer backend selected for this process. The apprt reads this
+/// to decide its per-surface render integration (widget, present path).
+pub fn activeBackend() Backend {
+    return active_backend;
 }
 
 /// The concrete renderer implementation type for a backend, or `void`
@@ -96,16 +120,27 @@ pub const Renderer = union(Backend) {
     // ---- construction ----------------------------------------------
 
     pub fn init(alloc: Allocator, options: Options) !Renderer {
-        const b = build_config.renderer;
-        return @unionInit(
-            Renderer,
-            @tagName(b),
-            try BackendImpl(b).init(alloc, options),
-        );
+        switch (activeBackend()) {
+            inline else => |b| {
+                if (comptime compiledIn(b)) {
+                    return @unionInit(
+                        Renderer,
+                        @tagName(b),
+                        try BackendImpl(b).init(alloc, options),
+                    );
+                } else unreachable;
+            },
+        }
     }
 
     pub fn surfaceInit(surface: *apprt.Surface) !void {
-        return BackendImpl(build_config.renderer).surfaceInit(surface);
+        switch (activeBackend()) {
+            inline else => |b| {
+                if (comptime compiledIn(b)) {
+                    return BackendImpl(b).surfaceInit(surface);
+                } else unreachable;
+            },
+        }
     }
 
     // ---- instance dispatch -----------------------------------------

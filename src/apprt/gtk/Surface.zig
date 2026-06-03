@@ -2,6 +2,7 @@ const Self = @This();
 
 const std = @import("std");
 const build_config = @import("../../build_config.zig");
+const rendererpkg = @import("../../renderer.zig");
 const apprt = @import("../../apprt.zig");
 const configpkg = @import("../../config.zig");
 const CoreSurface = @import("../../Surface.zig");
@@ -9,16 +10,18 @@ const ApprtApp = @import("App.zig");
 const Application = @import("class/application.zig").Application;
 const Surface = @import("class/surface.zig").Surface;
 
-/// Per-surface Vulkan platform descriptor type. Only meaningful on
-/// `-Drenderer=vulkan` builds; the renderer reads `rt_surface.platform`
-/// to fetch host handles and the `present` callback. On non-Vulkan
-/// builds this collapses to `void` so we don't pay a per-surface cost
-/// for unused function-pointer storage.
+/// Per-surface Vulkan platform descriptor type. Present whenever the
+/// Vulkan backend is *compiled in* (not just when it's the configured
+/// default), since the compiled Vulkan renderer reads
+/// `rt_surface.platform` for host handles + the `present` callback. On
+/// builds without Vulkan it collapses to `void` so we don't pay a
+/// per-surface cost for unused function-pointer storage.
 ///
-/// On Vulkan builds the `Surface` ctor (`class/surface.zig`) populates
-/// `rt_surface.platform` via `vulkan_host.asPlatform()`, pointing the
-/// `present` callback's userdata at the surface's `DmabufPaintable`.
-pub const Platform = if (build_config.renderer == .vulkan)
+/// When Vulkan is the active backend the `Surface` ctor
+/// (`class/surface.zig`) populates `rt_surface.platform` via
+/// `vulkan_host.asPlatform()`; otherwise it's left undefined and never
+/// read (the Vulkan renderer isn't constructed).
+pub const Platform = if (rendererpkg.compiledIn(.vulkan))
     apprt.platform.VulkanPlatform
 else
     void;
