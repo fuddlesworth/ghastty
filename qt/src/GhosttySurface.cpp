@@ -1,5 +1,6 @@
 #include "GhosttySurface.h"
 
+#include "app/GhosttyApp.h"
 #include "config/Config.h"
 #include "input/XkbState.h"
 #include "InspectorWindow.h"
@@ -8,11 +9,9 @@
 #include "SearchBar.h"
 #include "TabWidget.h"
 #include "Util.h"
-#ifdef GHASTTY_USE_VULKAN
+// Both render paths are compiled now (runtime renderer selection).
 #include "vulkan/Host.h"
-#else
 #include "opengl/EglDmabufTarget.h"
-#endif
 #include "wayland/DmabufRegistry.h"
 #include "wayland/SubsurfacePresenter.h"
 
@@ -107,61 +106,83 @@ GhosttySurface::GhosttySurface(ghostty_app_t app, MainWindow *owner,
   // wl_subsurface attaches to that shared parent, positioned at
   // the pane's offset within the top-level via `setPosition`.
 
-  // Pick the renderer up-front so the rest of the surface setup
-  // (GL context vs. Vulkan host) only touches the path we'll
-  // actually use. The choice is wired in at compile time via the
-  // `GHASTTY_USE_VULKAN` definition (set by CMake when
-  // `GHASTTY_VARIANT=vulkan`), because libghostty itself is built
-  // for exactly one renderer per .so and this binary is linked
-  // against one of them — a runtime env-var override could only
-  // produce a mismatch crash. Mixing GL+VK on the same process
-  // (e.g. NVIDIA's coexistence on one Wayland surface) is also
-  // reportedly fragile.
-  // The "use Vulkan" decision is purely compile-time on this fork:
-  // each binary is linked against exactly one libghostty.so variant
-  // (opengl or vulkan). A runtime fallback would just mis-initialize
-  // the surface against the wrong renderer.
+  // Pick the renderer at RUNTIME. libghostty (Linux `-Dapp-runtime=none`)
+  // now compiles both backends; we read its `renderer` config
+  // (auto|opengl|vulkan), resolve it against actual Vulkan availability,
+  // and tell the core via `ghostty_set_renderer` so it constructs the
+  // matching backend for the `platform_tag` + callbacks we install below.
+  // Decided once per process (all surfaces share the renderer — the
+  // core's active backend is process-global); later surfaces reuse it.
+  // Mixing GL+VK on one process is reportedly fragile, so it's one
+  // backend for the whole app, not per-surface.
   ghostty_surface_config_s sc =
       m_parentSurface
           ? ghostty_surface_inherited_config(m_parentSurface,
                                              GHOSTTY_SURFACE_CONTEXT_TAB)
           : ghostty_surface_config_new();
 
-#ifdef GHASTTY_USE_VULKAN
-  {
-    vulkan::Host *vk_host = vulkan::Host::instance();
-    if (vk_host == nullptr) {
-      // libghostty was compiled with -Drenderer=vulkan and there's
-      // no GL fallback available: libghostty's GL surface init
-      // would crash on the first call. Fail loudly here.
-      std::fprintf(stderr,
-                   "[ghastty] Vulkan host bring-up failed (no Vulkan 1.3 "
-                   "GPU with VK_KHR_external_memory_fd + "
-                   "VK_EXT_external_memory_dma_buf). The Vulkan variant "
-                   "of libghostty has no OpenGL fallback — exiting.\n");
-      std::abort();
+  static int s_useVulkan = -1;  // -1 undecided, 0 OpenGL, 1 Vulkan
+  if (s_useVulkan < 0) {
+    // Read the `renderer` config (an enum, marshaled by the C API as its
+    // tag-name string). Read from the process-global app config rather
+    // than the owner window's, so this process-once decision doesn't
+    // depend on which surface happens to be constructed first. Defaults
+    // to "auto" if unreadable.
+    QByteArray want = "auto";
+    if (ghostty_config_t cfg = GhosttyApp::instance().config()) {
+      const char *r = nullptr;
+      if (ghostty_config_get(cfg, &r, "renderer", sizeof("renderer") - 1) &&
+          r != nullptr) {
+        want = r;
+      }
     }
+    bool use_vk;
+    if (want == "opengl") {
+      // Explicit OpenGL: don't probe Vulkan at all — bringing up a
+      // Vulkan device (vkCreateInstance + device enumeration) would be
+      // wasted work and emit spurious failure logs on a system the user
+      // deliberately chose OpenGL for.
+      use_vk = false;
+    } else {
+      // Vulkan is "available" iff the host singleton brings up a Vulkan
+      // 1.3 device with the required external-memory extensions.
+      const bool vk_avail = vulkan::Host::instance() != nullptr;
+      use_vk = vk_avail;
+      if (want == "vulkan") {
+        if (!vk_avail)
+          std::fprintf(stderr,
+                       "[ghastty] renderer=vulkan but no usable Vulkan device; "
+                       "falling back to OpenGL\n");
+      } else if (want != "auto") {
+        std::fprintf(stderr,
+                     "[ghastty] unrecognized renderer=%s; using auto\n",
+                     want.constData());
+      }
+      // auto / unrecognized: prefer Vulkan when available, else OpenGL.
+    }
+    // Tell the core which backend to construct (overrides the `renderer`
+    // config it applied at app init). Must happen before our first
+    // surface's renderer initializes — which is below, in this ctor.
+    ghostty_set_renderer(use_vk ? GHOSTTY_PLATFORM_VULKAN
+                                : GHOSTTY_PLATFORM_OPENGL);
+    s_useVulkan = use_vk ? 1 : 0;
+    std::fprintf(stderr, "[ghastty] renderer backend: %s\n",
+                 use_vk ? "vulkan" : "opengl");
+  }
+  m_useVulkan = (s_useVulkan == 1);
+
+  if (m_useVulkan) {
+    vulkan::Host *vk_host = vulkan::Host::instance();
     // Prime the compositor dmabuf modifier registry on THIS thread
-    // (the GUI thread — surface ctors run there). The renderer
-    // thread will read it lock-free via the
-    // `get_supported_modifiers` platform callback. Idempotent if
-    // another surface already primed it. Same lifetime guarantee
-    // we used to achieve inside `Host::instance`'s `call_once`,
-    // but kept on the wayland side of the layering boundary.
+    // (the GUI thread — surface ctors run there). The renderer thread
+    // reads it lock-free via the `get_supported_modifiers` callback.
+    // Idempotent if another surface already primed it.
     ::wayland::primeDmabufModifierRegistry();
-    m_useVulkan = true;
     sc.platform_tag = GHOSTTY_PLATFORM_VULKAN;
     sc.platform.vulkan = vk_host->asPlatform(this);
-
-    // GUI-thread frame delivery is driven by
-    // `QMetaObject::invokeMethod` (Qt::QueuedConnection) from
-    // `presentVulkanDmabuf`. The earlier 2 ms safety-net polling
-    // timer was removed once delivery was shown to be reliable;
-    // any genuine loss is visible via the dropped-frame counter
-    // logged from `presentVulkanDmabuf`.
-  }
-#else
-  {
+    // GUI-thread frame delivery is driven by `QMetaObject::invokeMethod`
+    // (Qt::QueuedConnection) from `presentVulkanDmabuf`.
+  } else {
     // OpenGL path: stand up the private context + offscreen FBO
     // libghostty's GL renderer draws into.
     m_context = new QOpenGLContext(this);
@@ -192,7 +213,6 @@ GhosttySurface::GhosttySurface(ghostty_app_t app, MainWindow *owner,
     sc.platform.opengl.release_current = glReleaseCurrent;
     sc.platform.opengl.present = glPresent;
   }
-#endif
   sc.userdata = this;
   // Fork the shell at the OWNER WINDOW's device pixel ratio, not this
   // widget's. A freshly-constructed GhosttySurface has not yet been
@@ -251,7 +271,7 @@ GhosttySurface::GhosttySurface(ghostty_app_t app, MainWindow *owner,
   // path, so skip the setup. The Vulkan renderer handles alpha
   // pre-multiplication itself (or doesn't need to — the dmabuf
   // contents are already in the host's expected order).
-  if (!m_useVulkan && m_owner->needsPremultiply()) initPremultiply();
+  if (!m_useVulkan && m_owner && m_owner->needsPremultiply()) initPremultiply();
 
   // (No first-frame ctor gate — every variant we've tried so
   // far either captures a wrong-size frame and lets wp_viewport
@@ -306,20 +326,14 @@ GhosttySurface::~GhosttySurface() {
   delete m_fbo;
   delete m_premultProg;
   delete m_premultVao;
-#ifndef GHASTTY_USE_VULKAN
   // m_eglTarget owns a GL texture + framebuffer + EGLImage + dmabuf
   // fd. Reset it explicitly here, while the context is (best-effort)
   // current — the implicit unique_ptr destructor would fire AFTER
-  // doneCurrent() below, leaking the GL-side handles.
-  // If makeCurrent failed (m_offscreen invalidated mid-teardown,
-  // exactly the race the PlatformSurface handler also hits), the
-  // GL texture+FBO leak — the fd is closed by the dtor regardless.
-  // Log so the leak is visible, matching the PlatformSurface
-  // handler's behavior.
-  //
-  // Vulkan-variant builds don't have m_eglTarget at all (the field
-  // and its EglDmabufTarget type are preprocessed out), so the
-  // whole block is excluded.
+  // doneCurrent() below, leaking the GL-side handles. It's null on the
+  // Vulkan path, so this is a no-op there. If makeCurrent failed
+  // (m_offscreen invalidated mid-teardown, exactly the race the
+  // PlatformSurface handler also hits), the GL texture+FBO leak — the
+  // fd is closed by the dtor regardless. Log so the leak is visible.
   if (m_eglTarget && m_context && !current) {
     std::fprintf(stderr,
                  "[ghastty] ~GhosttySurface: m_eglTarget reset without "
@@ -327,7 +341,6 @@ GhosttySurface::~GhosttySurface() {
                  "will leak, fd is still closed\n");
   }
   m_eglTarget.reset();
-#endif
   if (current) m_context->doneCurrent();
 }
 
@@ -448,11 +461,8 @@ void GhosttySurface::syncSurfaceSize() {
     return;
   }
 
-#ifndef GHASTTY_USE_VULKAN
-  // OpenGL path. Vulkan-variant builds always take the `m_useVulkan`
-  // branch above and never reach here; the entire block is excluded
-  // at preprocessor time so the Vulkan binary doesn't pull in
-  // EglDmabufTarget (and transitively libEGL).
+  // OpenGL path. The `m_useVulkan` branch above returns, so we only
+  // reach here on the OpenGL backend.
   if (!makeCurrent()) return;
   m_eglTarget.reset();
   delete m_fbo;
@@ -491,7 +501,6 @@ void GhosttySurface::syncSurfaceSize() {
   ghostty_surface_set_size(m_surface, static_cast<uint32_t>(w),
                            static_cast<uint32_t>(h));
   renderTerminal();
-#endif
 }
 
 void GhosttySurface::moveEvent(QMoveEvent *) {
@@ -577,10 +586,8 @@ bool GhosttySurface::event(QEvent *e) {
       // the gl* calls, leaking the resources every time Qt
       // re-creates the QPA window (QSplitter reparent, fullscreen
       // toggle, screen change). Make the owning context current
-      // before tearing down. Vulkan-variant builds have no
-      // `m_context` or `m_eglTarget` and the whole block is
-      // preprocessed out below.
-#ifndef GHASTTY_USE_VULKAN
+      // before tearing down. On the Vulkan backend `m_eglTarget` and
+      // `m_context` are both null, so this is a no-op there.
       if (m_eglTarget) {
         if (m_context) {
           // Best-effort: if makeCurrent fails (the QOffscreenSurface
@@ -601,7 +608,6 @@ bool GhosttySurface::event(QEvent *e) {
         }
         m_eglTarget.reset();
       }
-#endif
       m_subsurfacePresenter.reset();
       m_presenterTopLevel = nullptr;
       // Presenter is gone — no frame_done callback will arrive.
@@ -775,8 +781,13 @@ bool GhosttySurface::event(QEvent *e) {
                 [this]() { onWaylandFrameReady(); });
             // Fresh presenter starts in "ready to present" state —
             // first present goes through immediately; subsequent
-            // presents wait for the frame callback.
-            m_compositorReady = true;
+            // presents wait for the frame callback. Take the mutex to
+            // match every other m_compositorReady access (safe here even
+            // pre-publication; keeps the invariant uniform).
+            {
+              std::lock_guard<std::mutex> lg(m_compositorMutex);
+              m_compositorReady = true;
+            }
             if (m_useVulkan) {
               m_useSubsurface.store(true, std::memory_order_release);
             } else {
@@ -900,10 +911,8 @@ void GhosttySurface::renderTerminal() {
     return;
   }
 
-#ifndef GHASTTY_USE_VULKAN
-  // OpenGL path. Vulkan-variant builds always take the early
-  // `m_useVulkan` return above; preprocessing the block out keeps
-  // the Vulkan binary free of EglDmabufTarget (and libEGL).
+  // OpenGL path. The `m_useVulkan` early-return above means we only
+  // reach here on the OpenGL backend.
   if (!makeCurrent()) return;
   if (!m_eglTarget && !m_fbo) return;
 
@@ -977,7 +986,6 @@ void GhosttySurface::renderTerminal() {
   m_fbo->release();
 
   update();
-#endif
 }
 
 void GhosttySurface::paintEvent(QPaintEvent *) {
@@ -2142,8 +2150,13 @@ void GhosttySurface::presentVulkanDmabuf(
     const int parked_fd = ::dup(dmabuf_fd);
     if (parked_fd < 0) {
       // Out of fds or other syscall failure. Drop the frame; renderer
-      // will deliver another one next compositor refresh.
-      m_compositorReady = true;  // unblock our own backpressure
+      // will deliver another one next compositor refresh. Take the
+      // mutex to set the flag — every other access to m_compositorReady
+      // is mutex-guarded, so this one must be too.
+      {
+        std::lock_guard<std::mutex> lg(m_compositorMutex);
+        m_compositorReady = true;  // unblock our own backpressure
+      }
       m_compositorCv.notify_all();
       return;
     }

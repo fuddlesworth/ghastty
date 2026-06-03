@@ -14,13 +14,25 @@ const Application = @import("class/application.zig").Application;
 const Surface = @import("Surface.zig");
 const ipcNewWindow = @import("ipc/new_window.zig").newWindow;
 const ipcToggleQuickTerminal = @import("ipc/toggle_quick_terminal.zig").toggleQuickTerminal;
+const rendererpkg = @import("../../renderer.zig");
 
 const log = std.log.scoped(.gtk);
 
 /// This is detected by the Renderer, in which case it sends a `redraw_surface`
 /// message so that we can call `drawFrame` ourselves from the app thread,
 /// because GTK's `GLArea` does not support drawing from a different thread.
-pub const must_draw_from_app_thread = true;
+///
+/// Vulkan renders into a dmabuf and hands frames back through a
+/// per-surface `DmabufPaintable`: the renderer thread only parks the
+/// frame (under a mutex), and a GUI-thread frame-clock tick builds the
+/// `GdkTexture` and calls `queueDraw` — so Vulkan can present from the
+/// renderer thread. A build can contain both backends with the renderer
+/// chosen at runtime: OpenGL must draw on the GUI thread (its GL context
+/// lives there), Vulkan draws on the renderer thread (presents via
+/// dmabuf).
+pub fn mustDrawFromAppThread() bool {
+    return rendererpkg.activeBackend() == .opengl;
+}
 
 /// GTK application ID
 pub const application_id = @import("build/info.zig").application_id;

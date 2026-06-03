@@ -8,8 +8,9 @@
 ///
 /// Initialize the overlay, apply features with `applyFeatures`, then
 /// get the resulting image with `pendingImage` to upload to the GPU.
-/// This works in concert with `renderer.image.State` to simplify. Draw
-/// it on the GPU as an image composited on top of the terminal output.
+/// This works in concert with `renderer.image.Pkg(GraphicsAPI).State`
+/// to simplify. Draw it on the GPU as an image composited on top of the
+/// terminal output.
 const Overlay = @This();
 
 const std = @import("std");
@@ -19,7 +20,7 @@ const terminal = @import("../terminal/main.zig");
 const size = @import("size.zig");
 const Size = size.Size;
 const CellSize = size.CellSize;
-const Image = @import("image.zig").Image;
+const Pending = @import("image.zig").Pending;
 
 const log = std.log.scoped(.renderer_overlay);
 
@@ -107,7 +108,7 @@ pub fn deinit(self: *Overlay, alloc: Allocator) void {
 }
 
 /// Returns a pending image that can be used to copy, convert, upload, etc.
-pub fn pendingImage(self: *const Overlay) Image.Pending {
+pub fn pendingImage(self: *const Overlay) Pending {
     return .{
         .width = @intCast(self.surface.getWidth()),
         .height = @intCast(self.surface.getHeight()),

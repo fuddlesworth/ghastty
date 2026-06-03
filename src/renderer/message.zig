@@ -49,7 +49,7 @@ pub const Message = union(enum) {
     change_config: struct {
         alloc: Allocator,
         thread: *renderer.Thread.DerivedConfig,
-        impl: *renderer.Renderer.DerivedConfig,
+        impl: *renderer.DerivedConfig,
     },
 
     /// Matches for the current viewport from the search thread. These happen
@@ -81,11 +81,11 @@ pub const Message = union(enum) {
     pub fn initChangeConfig(alloc: Allocator, config: *const configpkg.Config) !Message {
         const thread_ptr = try alloc.create(renderer.Thread.DerivedConfig);
         errdefer alloc.destroy(thread_ptr);
-        const config_ptr = try alloc.create(renderer.Renderer.DerivedConfig);
+        const config_ptr = try alloc.create(renderer.DerivedConfig);
         errdefer alloc.destroy(config_ptr);
 
         thread_ptr.* = renderer.Thread.DerivedConfig.init(config);
-        config_ptr.* = try renderer.Renderer.DerivedConfig.init(alloc, config);
+        config_ptr.* = try renderer.DerivedConfig.init(alloc, config);
         errdefer config_ptr.deinit();
 
         return .{

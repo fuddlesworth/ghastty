@@ -8,8 +8,23 @@ const ApprtApp = @import("App.zig");
 const Application = @import("class/application.zig").Application;
 const Surface = @import("class/surface.zig").Surface;
 
+/// Per-surface platform descriptor, tagged by which renderer backend is
+/// active for this surface (selected at runtime — see `renderer.zig`).
+/// The compiled renderers read `rt_surface.platform` for their host
+/// handles + present callback: Vulkan reads `.vulkan`, the OpenGL
+/// dmabuf-export path reads `.opengl`. `.none` is the default before the
+/// ctor wires a backend, and the value the OpenGL backend sees when the
+/// host can't offer the dmabuf path (it then falls back to GtkGLArea
+/// compositing).
+pub const Platform = union(enum) {
+    none,
+    vulkan: apprt.platform.VulkanPlatform,
+    opengl: apprt.platform.OpenGLPlatform,
+};
+
 /// The GObject Surface
 surface: *Surface,
+platform: Platform = .none,
 
 pub fn deinit(self: *Self) void {
     _ = self;

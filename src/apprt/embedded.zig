@@ -31,8 +31,11 @@ pub const App = struct {
     /// Whether drawing must happen on the app (GUI) thread rather than a
     /// dedicated renderer thread. The OpenGL renderer renders into the
     /// host's GL context, which the host owns on its GUI thread (e.g. a
-    /// QOpenGLWidget); Metal keeps its own renderer thread.
-    pub const must_draw_from_app_thread = build_config.renderer == .opengl;
+    /// QOpenGLWidget); Metal keeps its own renderer thread. A function
+    /// (not a const) so it tracks the runtime-selected backend.
+    pub fn mustDrawFromAppThread() bool {
+        return renderer.activeBackend() == .opengl;
+    }
 
     /// Because we only expect the embedding API to be used in embedded
     /// environments, the options are extern so that we can expose it
@@ -144,6 +147,29 @@ pub const App = struct {
 
         var keymap = try input.Keymap.init();
         errdefer keymap.deinit();
+
+        // Select the renderer backend at runtime from config. On Linux
+        // the embedded lib compiles both OpenGL + Vulkan; the host (e.g.
+        // the Qt frontend) picks via `renderer` and supplies the matching
+        // platform_tag + callbacks per surface. There's no in-process
+        // probe — the host owns the Vulkan device. Must run before any
+        // surface is created (here, at app init). `.auto` keeps the build
+        // default; Darwin/wasm only compile one backend so a mismatch
+        // just logs and keeps the default.
+        switch (config.renderer) {
+            .auto => {},
+            inline .opengl, .vulkan, .metal => |tag| {
+                const b: renderer.Backend = @field(renderer.Backend, @tagName(tag));
+                if (renderer.compiledIn(b)) {
+                    renderer.setActiveBackend(b);
+                } else {
+                    log.warn(
+                        "configured renderer={s} is not compiled in; using {s}",
+                        .{ @tagName(tag), @tagName(renderer.activeBackend()) },
+                    );
+                }
+            },
+        }
 
         self.* = .{
             .core_app = core_app,
@@ -371,7 +397,7 @@ pub const Platform = union(PlatformTag) {
     /// (e.g. a Qt, X11, or Wayland application embedding libghostty).
     ///
     /// libghostty draws on the app (GUI) thread for the OpenGL renderer
-    /// (the embedded apprt sets `must_draw_from_app_thread` for OpenGL),
+    /// (the embedded apprt sets `mustDrawFromAppThread()` for OpenGL),
     /// so these callbacks all run on the same thread that calls
     /// `ghostty_surface_new` and `ghostty_surface_draw`. The context
     /// only needs to be usable from that thread; it does not need to
@@ -403,62 +429,12 @@ pub const Platform = union(PlatformTag) {
     /// the host as dmabuf file descriptors so the host can sample
     /// them without a CPU readback.
     ///
-    /// Handles are `?*anyopaque` here so callers don't need Vulkan
-    /// headers to compile against the C API; treat them as VkInstance,
-    /// VkPhysicalDevice, VkDevice, VkQueue respectively.
-    pub const Vulkan = struct {
-        userdata: ?*anyopaque,
-
-        /// Resolve `vkGetInstanceProcAddr` (returned as `?*anyopaque`).
-        /// libghostty bootstraps the rest of the Vulkan loader from it.
-        get_instance_proc_addr: *const fn (
-            ?*anyopaque,
-            [*:0]const u8,
-        ) callconv(.c) ?*anyopaque,
-
-        /// Host-owned Vulkan handles. libghostty does not destroy
-        /// these.
-        instance: *const fn (?*anyopaque) callconv(.c) ?*anyopaque,
-        physical_device: *const fn (?*anyopaque) callconv(.c) ?*anyopaque,
-        device: *const fn (?*anyopaque) callconv(.c) ?*anyopaque,
-        queue: *const fn (?*anyopaque) callconv(.c) ?*anyopaque,
-        queue_family_index: *const fn (?*anyopaque) callconv(.c) u32,
-
-        /// Query the compositor-supported DRM modifiers for a given
-        /// DRM_FORMAT_* fourcc. Two-pass usage: call with
-        /// `out=null, capacity=0` for the count, then again with a
-        /// buffer of that size. Returns the number of modifiers
-        /// actually written. The renderer intersects this with the
-        /// GPU's per-modifier feature set to pick a tiling the
-        /// compositor will accept on attach.
-        get_supported_modifiers: *const fn (
-            ?*anyopaque,
-            u32, // DRM_FORMAT_*
-            ?[*]u64, // out
-            usize, // capacity
-        ) callconv(.c) usize,
-
-        /// Hand off a rendered frame to the host as a dmabuf fd. The
-        /// host imports it for composition; libghostty retains
-        /// ownership of the underlying VkDeviceMemory and the fd is
-        /// valid only for the duration of the call (host must `dup()`
-        /// if it needs to hold the fd longer). `image_backed` tells
-        /// the host whether the fd was exported from a VkImage
-        /// (directly importable as a 2D image via linux-dmabuf-v1)
-        /// or from a VkBuffer (only usable via mmap + CPU readback);
-        /// see `vulkan/Target.zig` and `include/ghostty.h` for the
-        /// full rationale.
-        present: *const fn (
-            ?*anyopaque,
-            i32, // dmabuf fd
-            u32, // DRM_FORMAT_*
-            u64, // DRM modifier
-            u32, // width (pixels)
-            u32, // height (pixels)
-            u32, // stride (bytes)
-            bool, // image_backed
-        ) callconv(.c) void,
-    };
+    /// The actual struct lives in `apprt/platform.zig` so non-embedded
+    /// apprts (the GTK Vulkan path) can construct the same shape
+    /// without depending on the libghostty C ABI plumbing in this
+    /// file. Aliased here to keep the `apprt.embedded.Platform.Vulkan`
+    /// path that the renderer and existing call sites use.
+    pub const Vulkan = apprt.platform.VulkanPlatform;
 
     // The C ABI compatible version of this union. The tag is expected
     // to be stored elsewhere.
@@ -1683,6 +1659,36 @@ pub const CAPI = struct {
         }
     }
 
+    /// Select the renderer backend at runtime, by platform tag
+    /// (GHOSTTY_PLATFORM_OPENGL / GHOSTTY_PLATFORM_VULKAN). The host
+    /// (e.g. the Qt frontend) calls this after probing which backend it
+    /// can drive — and before creating any surface — so the renderer the
+    /// core constructs matches the `platform_tag` + callbacks the host
+    /// will supply per surface. Overrides the `renderer` config that
+    /// `App.init` applied. No-op (with a warning) if that backend isn't
+    /// compiled in (e.g. Vulkan requested on a Darwin/Metal build).
+    export fn ghostty_set_renderer(platform: c_int) void {
+        switch (platform) {
+            @intFromEnum(PlatformTag.opengl) => applyBackend(.opengl),
+            @intFromEnum(PlatformTag.vulkan) => applyBackend(.vulkan),
+            else => log.warn(
+                "ghostty_set_renderer: platform tag {d} has no renderer backend",
+                .{platform},
+            ),
+        }
+    }
+
+    fn applyBackend(comptime b: renderer.Backend) void {
+        if (comptime renderer.compiledIn(b)) {
+            renderer.setActiveBackend(b);
+        } else {
+            log.warn(
+                "ghostty_set_renderer: backend {s} is not compiled in; keeping {s}",
+                .{ @tagName(b), @tagName(renderer.activeBackend()) },
+            );
+        }
+    }
+
     /// Create a new app.
     export fn ghostty_app_new(
         opts: *const apprt.runtime.App.Options,
@@ -2481,7 +2487,7 @@ pub const CAPI = struct {
             // Get the shared font grid. We acquire a read lock to
             // read the font face. It should not be deferred since
             // we're loading the primary face.
-            const grid = ptr.core_surface.renderer.font_grid;
+            const grid = ptr.core_surface.renderer.fontGrid();
             grid.lock.lockShared();
             defer grid.lock.unlockShared();
 

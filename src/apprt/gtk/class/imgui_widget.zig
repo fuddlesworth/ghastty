@@ -221,6 +221,20 @@ pub const ImguiWidget = extern struct {
             return;
         }
 
+        // Load ghostty's GL function pointers (glad) for this thread. glad's
+        // function table is threadlocal: the OpenGL renderer loads it on the
+        // app thread (mustDrawFromAppThread), but the Vulkan renderer runs on
+        // its own thread and never loads it here. Without this, the
+        // gl.clearColor/gl.clear calls in glAreaRender would dereference null
+        // function pointers and panic. Re-loading when the OpenGL renderer
+        // already loaded it on this thread is harmless: the pointers are
+        // context-independent on desktop GL. We intentionally do not unload on
+        // unrealize so the OpenGL renderer's shared table survives.
+        _ = gl.glad.load(null) catch |err| {
+            log.warn("failed to load GL functions for Dear ImGui widget: {}", .{err});
+            return;
+        };
+
         priv.ig_context = cimgui.c.ImGui_CreateContext(null) orelse {
             log.warn("unable to initialize Dear ImGui context", .{});
             return;
@@ -249,7 +263,11 @@ pub const ImguiWidget = extern struct {
     /// Handle a request to unrealize the GLArea
     fn glAreaUnrealize(_: *gtk.GLArea, self: *ImguiWidget) callconv(.c) void {
         const priv = self.private();
-        assert(priv.ig_context != null);
+        // If glAreaRealize bailed before creating the ImGui context (e.g. the
+        // GLArea failed to realize or glad failed to load), there is nothing
+        // to tear down. Returning also avoids passing null to
+        // ImGui_DestroyContext below.
+        const ig_context = priv.ig_context orelse return;
 
         // Remove the tick callback if it was registered.
         if (priv.tick_callback_id != 0) {
@@ -258,16 +276,20 @@ pub const ImguiWidget = extern struct {
         }
 
         // Unrealize is not guaranteed to be called with a current GL context,
-        // so we make it current for ImGui cleanup.
+        // so we make it current for the ImGui OpenGL backend cleanup (which
+        // touches GPU objects). If that fails we skip only the GL-side
+        // shutdown — we must still destroy the ImGui context below so it is
+        // not leaked and a later re-realize doesn't trip the
+        // `ig_context == null` assertion in glAreaRealize.
         priv.gl_area.makeCurrent();
         if (priv.gl_area.getError()) |err| {
-            log.warn("GLArea for Dear ImGui widget failed to realize: {s}", .{err.f_message orelse "(unknown)"});
-            return;
+            log.warn("GLArea for Dear ImGui widget failed to make current during unrealize: {s}", .{err.f_message orelse "(unknown)"});
+        } else {
+            cimgui.c.ImGui_SetCurrentContext(ig_context);
+            cimgui.ImGui_ImplOpenGL3_ShutdownWithLoaderCleanup();
         }
 
-        self.setCurrentContext() catch return;
-        cimgui.ImGui_ImplOpenGL3_ShutdownWithLoaderCleanup();
-        cimgui.c.ImGui_DestroyContext(priv.ig_context);
+        cimgui.c.ImGui_DestroyContext(ig_context);
         priv.ig_context = null;
     }
 

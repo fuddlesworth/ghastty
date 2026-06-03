@@ -9,6 +9,15 @@ const gobject = @import("gobject");
 const gtk = @import("gtk");
 
 const build_config = @import("../../../build_config.zig");
+const rendererpkg = @import("../../../renderer.zig");
+const vulkan_host = if (rendererpkg.compiledIn(.vulkan))
+    @import("../vulkan/Host.zig")
+else
+    void;
+const opengl_host = if (rendererpkg.compiledIn(.vulkan))
+    @import("../opengl/Host.zig")
+else
+    void;
 const build_info = @import("../build/info.zig");
 const state = &@import("../../../global.zig").state;
 const i18n = @import("../../../os/main.zig").i18n;
@@ -292,6 +301,16 @@ pub const Application = extern struct {
             log.warn("i18n initialization failed error={}", .{err});
         };
 
+        // Select the renderer backend for this process before GTK init or
+        // any surface is created — both `setGtkEnv` and the Surface ctor
+        // read `renderer.activeBackend()`. Honors the `renderer` config;
+        // for `auto`/`vulkan` it probes Vulkan availability and falls back
+        // to OpenGL when Vulkan can't be brought up. No-op on builds with a
+        // single compiled backend.
+        const renderer_backend = selectBackend(&config);
+        rendererpkg.setActiveBackend(renderer_backend);
+        log.info("renderer backend selected backend={s}", .{@tagName(renderer_backend)});
+
         // Setup our GTK init env vars
         setGtkEnv(&config) catch |err| switch (err) {
             error.NoSpaceLeft => {
@@ -456,6 +475,18 @@ pub const Application = extern struct {
         priv.css_provider.unref();
         for (priv.custom_css_providers.items) |provider| provider.unref();
         priv.custom_css_providers.deinit(alloc);
+
+        // Tear down the process-wide render hosts last. We're past the
+        // main loop here, so every surface is finalized and its
+        // renderer thread (which borrows the host's VkDevice/Instance)
+        // is joined. Both are no-ops + idempotent if the backend was
+        // never brought up or deinit runs twice (terminate() then
+        // finalize()): the Vulkan host frees its VkDevice/Instance, the
+        // OpenGL host closes its dlopen'd libEGL handle.
+        if (rendererpkg.compiledIn(.vulkan)) {
+            vulkan_host.deinit();
+            opengl_host.deinit();
+        }
     }
 
     /// The global allocator that all other classes should use by
@@ -2839,12 +2870,50 @@ const Action = struct {
     }
 };
 
+/// Pick the renderer backend from the `renderer` config, honoring only
+/// backends compiled into this build and probing Vulkan availability for
+/// `auto`/`vulkan` (with OpenGL fallback). Called once at startup before
+/// GTK init.
+fn selectBackend(config: *const CoreConfig) rendererpkg.Backend {
+    return switch (config.renderer) {
+        .opengl => .opengl,
+        .auto => if (vulkanUsable()) .vulkan else .opengl,
+        .vulkan => if (vulkanUsable()) .vulkan else blk: {
+            log.warn("config renderer=vulkan but Vulkan is unavailable; using OpenGL", .{});
+            break :blk .opengl;
+        },
+        .metal => if (rendererpkg.compiledIn(.metal)) .metal else blk: {
+            log.warn("config renderer=metal not available in this build; using OpenGL", .{});
+            break :blk .opengl;
+        },
+    };
+}
+
+/// Whether the Vulkan backend is compiled in AND can bring up a device on
+/// this system. Probing creates the process-wide Vulkan host lazily; we
+/// only call this for `auto`/`vulkan` so an OpenGL choice never pays for
+/// a VkInstance.
+fn vulkanUsable() bool {
+    return if (rendererpkg.compiledIn(.vulkan))
+        vulkan_host.instance() != null
+    else
+        false;
+}
+
 /// This sets various GTK-related environment variables as necessary
 /// given the runtime environment or configuration.
 ///
 /// This must be called BEFORE GTK initialization.
 fn setGtkEnv(config: *const CoreConfig) error{NoSpaceLeft}!void {
     assert(gtk.isInitialized() == 0);
+
+    // On `-Drenderer=vulkan` builds the Vulkan renderer is the whole
+    // point: GDK must keep its Vulkan backend enabled so it can import
+    // and composite the renderer's dmabuf output. Disabling it (the
+    // default below, kept for the OpenGL renderer where GDK Vulkan is
+    // just startup overhead) leaves the GtkPicture with no usable
+    // paintable and the window renders fully transparent.
+    const want_vulkan = rendererpkg.activeBackend() == .vulkan;
 
     var gdk_debug: struct {
         /// output OpenGL debug information
@@ -2854,8 +2923,9 @@ fn setGtkEnv(config: *const CoreConfig) error{NoSpaceLeft}!void {
         // GTK's new renderer can cause blurry font when using fractional scaling.
         @"gl-no-fractional": bool = false,
         /// Disabling Vulkan can improve startup times by hundreds of
-        /// milliseconds on some systems. We don't use Vulkan so we can just
-        /// disable it.
+        /// milliseconds on some systems, so we disable it for the OpenGL
+        /// renderer. It is kept enabled on the Vulkan renderer (see the
+        /// `want_vulkan` handling above), which needs GDK's Vulkan backend.
         @"vulkan-disable": bool = false,
     } = .{
         // `gtk-opengl-debug` dumps logs directly to stderr so both must be true
@@ -2870,8 +2940,9 @@ fn setGtkEnv(config: *const CoreConfig) error{NoSpaceLeft}!void {
         /// gtk issue: https://gitlab.gnome.org/GNOME/gtk/-/issues/6864
         @"color-mgmt": bool = true,
         /// Disabling Vulkan can improve startup times by hundreds of
-        /// milliseconds on some systems. We don't use Vulkan so we can just
-        /// disable it.
+        /// milliseconds on some systems, so we disable it for the OpenGL
+        /// renderer. It is kept enabled on the Vulkan renderer (see the
+        /// `want_vulkan` handling above), which needs GDK's Vulkan backend.
         vulkan: bool = false,
     } = .{};
 
@@ -2884,7 +2955,7 @@ fn setGtkEnv(config: *const CoreConfig) error{NoSpaceLeft}!void {
             // From gtk 4.16, GDK_DEBUG is split into GDK_DEBUG and GDK_DISABLE.
             // For the remainder of "why" see the 4.14 comment below.
             gdk_disable.@"gles-api" = true;
-            gdk_disable.vulkan = true;
+            gdk_disable.vulkan = !want_vulkan;
             break :environment;
         }
         if (gtk_version.runtimeAtLeast(4, 14, 0)) {
@@ -2895,7 +2966,7 @@ fn setGtkEnv(config: *const CoreConfig) error{NoSpaceLeft}!void {
             //
             // Upstream issue: https://gitlab.gnome.org/GNOME/gtk/-/issues/6589
             gdk_debug.@"gl-disable-gles" = true;
-            gdk_debug.@"vulkan-disable" = true;
+            gdk_debug.@"vulkan-disable" = !want_vulkan;
 
             if (gtk_version.runtimeUntil(4, 17, 5)) {
                 // Removed at GTK v4.17.5
@@ -2907,7 +2978,7 @@ fn setGtkEnv(config: *const CoreConfig) error{NoSpaceLeft}!void {
         // Versions prior to 4.14 are a bit of an unknown for Ghostty. It
         // is an environment that isn't tested well and we don't have a
         // good understanding of what we may need to do.
-        gdk_debug.@"vulkan-disable" = true;
+        gdk_debug.@"vulkan-disable" = !want_vulkan;
     }
 
     {

@@ -20,20 +20,38 @@ Overlay terminal_page {
     hexpand: true;
     vexpand: true;
 
-    GLArea gl_area {
-      realize => $gl_realize();
-      unrealize => $gl_unrealize();
-      map => $gl_map();
-      unmap => $gl_unmap();
-      render => $gl_render();
-      resize => $gl_resize();
+    // Inner Overlay stacking `present_picture` over the render widget.
+    // The render widget itself (a GtkGLArea on OpenGL, a GtkDrawingArea
+    // on Vulkan) is NOT declared here: it is built in code and installed
+    // as this overlay's main child — see `Surface.init` in
+    // `class/surface.zig` — so its type can vary by renderer. The input
+    // event controllers live on the parent Box below, so input works
+    // regardless of the render widget's type.
+    Overlay render_overlay {
       hexpand: true;
       vexpand: true;
-      focusable: true;
-      focus-on-click: true;
-      has-stencil-buffer: false;
-      has-depth-buffer: false;
-      allowed-apis: gl;
+
+      // Overlaid on top of the render widget. On the dmabuf present modes
+      // (Vulkan, or OpenGL with EGL dmabuf export) the apprt assigns a
+      // per-surface `DmabufPaintable` from `class/surface.zig` over a
+      // GtkDrawingArea, and this is what the user sees. On the GtkGLArea
+      // fallback (OpenGL without dmabuf export) no paintable is assigned,
+      // so this renders nothing (fully transparent) and the GLArea below
+      // shows through. `can-target: false` lets input pass to the widget
+      // below in every mode.
+      [overlay]
+      Picture present_picture {
+        // Stretches the dmabuf texture to the widget's pixel size.
+        // The Vulkan renderer already produces frames sized to the
+        // surface size we report through `surfaceSize`, so this is
+        // a 1:1 sample in the steady state; `fill` only matters
+        // mid-resize, when the renderer is one frame behind GTK.
+        content-fit: fill;
+        can-target: false;
+        focusable: false;
+        hexpand: true;
+        vexpand: true;
+      }
     }
 
     PopoverMenu context_menu {

@@ -14,6 +14,8 @@ const Renderer = rendererpkg.GenericRenderer(OpenGL);
 
 pub const GraphicsAPI = OpenGL;
 pub const Target = @import("opengl/Target.zig");
+pub const DmabufTarget = @import("opengl/DmabufTarget.zig");
+const egl = @import("opengl/egl.zig");
 pub const Frame = @import("opengl/Frame.zig");
 pub const RenderPass = @import("opengl/RenderPass.zig");
 pub const Pipeline = @import("opengl/Pipeline.zig");
@@ -36,6 +38,11 @@ pub const supports_custom_shaders: bool = true;
 /// sync, we have no need for multi-buffering.
 pub const swap_chain_count = 1;
 
+/// Number of dmabuf targets cycled on the GTK dmabuf-export present path
+/// (see `dmabuf_ring`). Mirrors a small swap chain so the compositor
+/// isn't sampling a buffer we're overwriting. Unused on other paths.
+const dmabuf_ring_len = 3;
+
 const log = std.log.scoped(.opengl);
 
 /// We require at least OpenGL 4.3
@@ -55,6 +62,25 @@ last_target: ?Target = null,
 /// keeps in sync).
 rt_surface: *apprt.Surface,
 
+/// GTK dmabuf-export present path (zero-copy → `GdkDmabufTexture`),
+/// mirroring the Vulkan backend. Active when the host hands us an
+/// `OpenGLPlatform` (via `rt_surface.platform`) and EGL exposes
+/// `EGL_MESA_image_dma_buf_export`. When inactive we fall back to
+/// blitting the GtkGLArea default framebuffer (the path below).
+///
+/// Resolved lazily on the first `present` (GUI thread, GL context
+/// current). `egl_probed` guards a one-time resolution so a missing
+/// extension is cached instead of retried every frame.
+egl_dispatch: ?egl.Dispatch = null,
+egl_probed: bool = false,
+/// Ring of dmabuf targets, cycled per present. Multiple buffers so the
+/// compositor (which samples a presented dmabuf asynchronously) is never
+/// reading the same buffer we're blitting the next frame into — the
+/// OpenGL analog of the Vulkan backend's swap chain. Each slot is
+/// (re)created lazily on first use / size change. `null` until used.
+dmabuf_ring: [dmabuf_ring_len]?DmabufTarget = [_]?DmabufTarget{null} ** dmabuf_ring_len,
+dmabuf_index: usize = 0,
+
 /// NOTE: This is an error{}!OpenGL instead of just OpenGL for parity with
 ///       Metal, since it needs to be fallible so does this, even though it
 ///       can't actually fail.
@@ -67,7 +93,29 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) error{}!OpenGL {
 }
 
 pub fn deinit(self: *OpenGL) void {
+    // The dmabuf ring's GL objects are freed in `displayUnrealized` (GTK)
+    // while the context is still current. By the time `deinit` runs the
+    // ring is already empty in practice: the dmabuf-export path only
+    // populates it on GTK, and there the GLArea always unrealizes before
+    // teardown; the embedded host never populates it at all. This call is
+    // therefore a no-op safety net that, in the normal case, issues no GL
+    // calls without a current context. (If a slot somehow survived, its
+    // `DmabufTarget.deinit` would also issue GL deletes with no current
+    // context — ignored in practice — and its fd close is always safe.)
+    self.freeDmabufRing();
     self.* = undefined;
+}
+
+/// Free every dmabuf target in the ring (closes fds, deletes GL
+/// objects). Idempotent. GL deletes require a current context — callers
+/// that have one (`displayUnrealized`) should prefer it over `deinit`.
+fn freeDmabufRing(self: *OpenGL) void {
+    for (&self.dmabuf_ring) |*slot| {
+        if (slot.*) |*dt| {
+            dt.deinit();
+            slot.* = null;
+        }
+    }
 }
 
 /// 32-bit windows cross-compilation breaks with `.c` for some reason, so...
@@ -172,7 +220,7 @@ fn prepareContext(getProcAddress: anytype) !void {
 /// Host-provided OpenGL callbacks for the embedded apprt.
 ///
 /// libghostty draws on the app thread for the OpenGL renderer
-/// (`must_draw_from_app_thread`), so these callbacks are set in
+/// (`mustDrawFromAppThread()`), so these callbacks are set in
 /// `surfaceInit` and read by `present` on that same thread. The
 /// renderer thread is a no-op for OpenGL (see threadEnter/threadExit).
 /// `threadlocal` keeps the bookkeeping per-thread without an explicit
@@ -206,7 +254,7 @@ pub fn surfaceInit(surface: *apprt.Surface) !void {
         => try prepareContext(null),
 
         // The OpenGL embedded path draws on the app thread
-        // (must_draw_from_app_thread). Make the host context current on
+        // (mustDrawFromAppThread()). Make the host context current on
         // this — the app — thread and load GL; it stays current here for
         // the surface's lifetime.
         apprt.embedded => switch (surface.platform) {
@@ -250,7 +298,7 @@ pub fn threadEnter(self: *const OpenGL, surface: *apprt.Surface) !void {
         else => @compileError("unsupported app runtime for OpenGL"),
 
         // GTK and the OpenGL embedded path both draw on the app thread
-        // (must_draw_from_app_thread), so the renderer thread must not
+        // (mustDrawFromAppThread()), so the renderer thread must not
         // touch the GL context.
         apprt.gtk, apprt.embedded => {},
     }
@@ -282,6 +330,15 @@ pub fn displayRealized(self: *const OpenGL) void {
 
         else => @compileError("only GTK should be calling displayRealized"),
     }
+}
+
+/// Called (GTK) when the GL context is about to be released — while it is
+/// still current (the apprt makes it current before unrealize). Free the
+/// dmabuf ring's GL objects here so we never issue GL deletes after the
+/// context is gone (see `deinit`). No-op on the GtkGLArea path (empty
+/// ring) and harmless if called more than once.
+pub fn displayUnrealized(self: *OpenGL) void {
+    self.freeDmabufRing();
 }
 
 /// Actions taken before doing anything in `drawFrame`.
@@ -337,8 +394,18 @@ pub fn surfaceSize(self: *const OpenGL) !struct { width: u32, height: u32 } {
         else => @compileError("unsupported app runtime for OpenGL"),
 
         // GTK keeps the GL viewport in sync with the GLArea size, so it
-        // is a reliable source of the drawable size.
+        // is a reliable source of the drawable size — for the GtkGLArea
+        // path. The OpenGL-dmabuf path renders into our own FBO with no
+        // GtkGLArea, so there's no synced viewport; use the apprt's
+        // tracked size instead (set from the DrawingArea resize).
         apprt.gtk => {
+            switch (self.rt_surface.platform) {
+                .opengl => {
+                    const s = try self.rt_surface.getSize();
+                    return .{ .width = s.width, .height = s.height };
+                },
+                else => {},
+            }
             var viewport: [4]gl.c.GLint = undefined;
             gl.glad.context.GetIntegerv.?(gl.c.GL_VIEWPORT, &viewport);
             return .{
@@ -368,6 +435,25 @@ pub fn initTarget(self: *const OpenGL, width: usize, height: usize) !Target {
 
 /// Present the provided target.
 pub fn present(self: *OpenGL, target: Target) !void {
+    // Remember this target so no-op frames can re-present it.
+    self.last_target = target;
+
+    // GTK dmabuf-export path: render the frame out as a dmabuf and hand
+    // it to the host for zero-copy display (GdkDmabufTexture), bypassing
+    // GtkGLArea's GL→GSK compositor import.
+    if (comptime apprt.runtime == apprt.gtk) {
+        if (self.dmabufPlatform()) |platform| {
+            // A surface using this path was built with a GtkDrawingArea
+            // (decided at apprt init from the EGL-export probe), so there
+            // is NO GtkGLArea blit fallback. Propagate failures rather
+            // than silently presenting nothing: the previously-installed
+            // frame stays on screen and the error reaches the renderer
+            // health path instead of blitting into a void framebuffer.
+            try self.presentDmabuf(platform, target);
+            return;
+        }
+    }
+
     // In order to present a target we blit it to the default framebuffer.
 
     // We disable GL_FRAMEBUFFER_SRGB while doing this blit, otherwise the
@@ -397,9 +483,6 @@ pub fn present(self: *OpenGL, target: Target) !void {
         gl.c.GL_NEAREST,
     );
 
-    // Keep track of this target in case we need to repeat it.
-    self.last_target = target;
-
     // Embedded OpenGL hosts own buffer presentation: the blit above only
     // writes the default framebuffer, so ask the host to swap buffers.
     // (GTK presents implicitly via its GLArea, so this is embedded-only.)
@@ -422,6 +505,102 @@ pub fn present(self: *OpenGL, target: Target) !void {
 /// Present the last presented target again.
 pub fn presentLastTarget(self: *OpenGL) !void {
     if (self.last_target) |target| try self.present(target);
+}
+
+/// The host's OpenGL dmabuf platform for this surface, or null if this
+/// surface isn't on the dmabuf-export path. GTK-only.
+fn dmabufPlatform(self: *OpenGL) ?apprt.platform.OpenGLPlatform {
+    return switch (self.rt_surface.platform) {
+        .opengl => |p| p,
+        else => null,
+    };
+}
+
+/// Blit the rendered frame into a dmabuf-backed texture and hand the fd
+/// to the host. GUI thread, GL context current (the apprt makes it
+/// current around the draw). Returns an error if EGL export is
+/// unavailable or the target can't be built — the caller propagates it
+/// (no GL-blit fallback exists for a dmabuf-path surface).
+fn presentDmabuf(
+    self: *OpenGL,
+    platform: apprt.platform.OpenGLPlatform,
+    target: Target,
+) !void {
+    // Resolve the EGL export entry points once; cache the result (incl.
+    // a null = unsupported) so we don't re-probe every frame.
+    if (!self.egl_probed) {
+        self.egl_probed = true;
+        self.egl_dispatch = egl.Dispatch.init(
+            platform.get_proc_address,
+            platform.userdata,
+        );
+    }
+    const dispatch = self.egl_dispatch orelse return error.DmabufExportUnsupported;
+    const display = platform.egl_display(platform.userdata) orelse
+        return error.DmabufExportUnsupported;
+
+    const w: u32 = @intCast(target.width);
+    const h: u32 = @intCast(target.height);
+
+    // Cycle to the next ring slot; (re)create it on first use / resize.
+    const slot = &self.dmabuf_ring[self.dmabuf_index];
+    self.dmabuf_index = (self.dmabuf_index + 1) % dmabuf_ring_len;
+    const stale = if (slot.*) |dt|
+        (dt.width != w or dt.height != h)
+    else
+        true;
+    if (stale) {
+        if (slot.*) |*dt| dt.deinit();
+        slot.* = null;
+        slot.* = try DmabufTarget.init(
+            dispatch,
+            display,
+            dispatch.getCurrentContext(),
+            w,
+            h,
+        );
+    }
+    const dt = &slot.*.?;
+
+    // Blit the rendered frame (internal target FBO) into the dmabuf FBO,
+    // flipping Y: GL renders bottom-left origin, but the dmabuf is
+    // sampled top-down by the host's GdkDmabufTexture. See the SRGB note
+    // on the default-blit path above for why we disable it here too.
+    try gl.disable(gl.c.GL_FRAMEBUFFER_SRGB);
+    defer gl.enable(gl.c.GL_FRAMEBUFFER_SRGB) catch |err| {
+        log.err("Error re-enabling GL_FRAMEBUFFER_SRGB, err={}", .{err});
+    };
+
+    const read_bind = try target.framebuffer.bind(.read);
+    defer read_bind.unbind();
+    gl.glad.context.BindFramebuffer.?(gl.c.GL_DRAW_FRAMEBUFFER, dt.framebuffer);
+    gl.glad.context.BlitFramebuffer.?(
+        0,
+        0,
+        @intCast(target.width),
+        @intCast(target.height),
+        0,
+        @intCast(h), // dst Y inverted (top<->bottom): vertical flip
+        @intCast(w),
+        0,
+        gl.c.GL_COLOR_BUFFER_BIT,
+        gl.c.GL_NEAREST,
+    );
+    gl.glad.context.BindFramebuffer.?(gl.c.GL_DRAW_FRAMEBUFFER, 0);
+
+    // Submit the blit so the importing compositor sees a complete frame.
+    // dma-buf implicit fencing (Mesa) handles read-after-write ordering.
+    gl.glad.context.Flush.?();
+
+    platform.present(
+        platform.userdata,
+        dt.fd,
+        dt.drm_format,
+        dt.drm_modifier,
+        w,
+        h,
+        dt.stride,
+    );
 }
 
 /// Returns the options to use when constructing buffers.

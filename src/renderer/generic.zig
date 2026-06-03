@@ -19,7 +19,6 @@ const isCovering = cellpkg.isCovering;
 const rowNeverExtendBg = @import("row.zig").neverExtendBg;
 const Overlay = @import("Overlay.zig");
 const imagepkg = @import("image.zig");
-const ImageState = imagepkg.State;
 const shadertoy = @import("shadertoy.zig");
 const assert = @import("../quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
@@ -93,6 +92,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         const shaderpkg = GraphicsAPI.shaders;
         const Shaders = shaderpkg.Shaders;
 
+        // Backend-dependent image types, instantiated for this backend.
+        const ImagePkg = imagepkg.Pkg(GraphicsAPI);
+        const ImageState = ImagePkg.State;
+
         /// Allocator that can be used
         alloc: std.mem.Allocator,
 
@@ -145,7 +148,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// The current set of cells to render. This is rebuilt on every frame
         /// but we keep this around so that we don't reallocate. Each set of
         /// cells goes into a separate shader.
-        cells: cellpkg.Contents,
+        cells: cellpkg.Cell(GraphicsAPI.shaders).Contents,
 
         /// Set to true after rebuildCells is called. This can be used
         /// to determine if any possible changes have been made to the
@@ -177,7 +180,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         images: ImageState = .empty,
 
         /// Background image, if we have one.
-        bg_image: ?imagepkg.Image = null,
+        bg_image: ?ImagePkg.Image = null,
         /// Set whenever the background image changes, signalling
         /// that the new background image needs to be uploaded to
         /// the GPU.
@@ -533,127 +536,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// The configuration for this renderer that is derived from the main
         /// configuration. This must be exported so that we don't need to
         /// pass around Config pointers which makes memory management a pain.
-        pub const DerivedConfig = struct {
-            arena: ArenaAllocator,
-
-            font_thicken: bool,
-            font_thicken_strength: u8,
-            font_features: std.ArrayListUnmanaged([:0]const u8),
-            font_styles: font.CodepointResolver.StyleStatus,
-            font_shaping_break: configpkg.FontShapingBreak,
-            cursor_color: ?configpkg.Config.TerminalColor,
-            cursor_opacity: f64,
-            cursor_text: ?configpkg.Config.TerminalColor,
-            background: terminal.color.RGB,
-            background_opacity: f64,
-            background_opacity_cells: bool,
-            foreground: terminal.color.RGB,
-            selection_background: ?configpkg.Config.TerminalColor,
-            selection_foreground: ?configpkg.Config.TerminalColor,
-            search_background: configpkg.Config.TerminalColor,
-            search_foreground: configpkg.Config.TerminalColor,
-            search_selected_background: configpkg.Config.TerminalColor,
-            search_selected_foreground: configpkg.Config.TerminalColor,
-            bold_color: ?terminal.Style.BoldColor,
-            faint_opacity: u8,
-            min_contrast: f32,
-            padding_color: configpkg.WindowPaddingColor,
-            custom_shaders: configpkg.RepeatablePath,
-            bg_image: ?configpkg.Path,
-            bg_image_opacity: f32,
-            bg_image_position: configpkg.BackgroundImagePosition,
-            bg_image_fit: configpkg.BackgroundImageFit,
-            bg_image_repeat: bool,
-            links: link.Set,
-            vsync: bool,
-            colorspace: configpkg.Config.WindowColorspace,
-            blending: configpkg.Config.AlphaBlending,
-            background_blur: configpkg.Config.BackgroundBlur,
-            scroll_to_bottom_on_output: bool,
-
-            pub fn init(
-                alloc_gpa: Allocator,
-                config: *const configpkg.Config,
-            ) !DerivedConfig {
-                var arena = ArenaAllocator.init(alloc_gpa);
-                errdefer arena.deinit();
-                const alloc = arena.allocator();
-
-                // Copy our shaders
-                const custom_shaders = try config.@"custom-shader".clone(alloc);
-
-                // Copy our background image
-                const bg_image =
-                    if (config.@"background-image") |bg|
-                        try bg.clone(alloc)
-                    else
-                        null;
-
-                // Copy our font features
-                const font_features = try config.@"font-feature".clone(alloc);
-
-                // Get our font styles
-                var font_styles = font.CodepointResolver.StyleStatus.initFill(true);
-                font_styles.set(.bold, config.@"font-style-bold" != .false);
-                font_styles.set(.italic, config.@"font-style-italic" != .false);
-                font_styles.set(.bold_italic, config.@"font-style-bold-italic" != .false);
-
-                // Our link configs
-                const links = try link.Set.fromConfig(
-                    alloc,
-                    config.link.links.items,
-                );
-
-                return .{
-                    .background_opacity = @max(0, @min(1, config.@"background-opacity")),
-                    .background_opacity_cells = config.@"background-opacity-cells",
-                    .font_thicken = config.@"font-thicken",
-                    .font_thicken_strength = config.@"font-thicken-strength",
-                    .font_features = font_features.list,
-                    .font_styles = font_styles,
-                    .font_shaping_break = config.@"font-shaping-break",
-
-                    .cursor_color = config.@"cursor-color",
-                    .cursor_text = config.@"cursor-text",
-                    .cursor_opacity = @max(0, @min(1, config.@"cursor-opacity")),
-
-                    .background = config.background.toTerminalRGB(),
-                    .foreground = config.foreground.toTerminalRGB(),
-                    .bold_color = if (config.@"bold-color") |b| b.toTerminal() else null,
-                    .faint_opacity = @intFromFloat(@ceil(config.@"faint-opacity" * 255)),
-
-                    .min_contrast = @floatCast(config.@"minimum-contrast"),
-                    .padding_color = config.@"window-padding-color",
-
-                    .selection_background = config.@"selection-background",
-                    .selection_foreground = config.@"selection-foreground",
-                    .search_background = config.@"search-background",
-                    .search_foreground = config.@"search-foreground",
-                    .search_selected_background = config.@"search-selected-background",
-                    .search_selected_foreground = config.@"search-selected-foreground",
-
-                    .custom_shaders = custom_shaders,
-                    .bg_image = bg_image,
-                    .bg_image_opacity = config.@"background-image-opacity",
-                    .bg_image_position = config.@"background-image-position",
-                    .bg_image_fit = config.@"background-image-fit",
-                    .bg_image_repeat = config.@"background-image-repeat",
-                    .links = links,
-                    .vsync = config.@"window-vsync",
-                    .colorspace = config.@"window-colorspace",
-                    .blending = config.@"alpha-blending",
-                    .background_blur = config.@"background-blur",
-                    .scroll_to_bottom_on_output = config.@"scroll-to-bottom".output,
-                    .arena = arena,
-                };
-            }
-
-            pub fn deinit(self: *DerivedConfig) void {
-                const alloc = self.arena.allocator();
-                self.links.deinit(alloc);
-                self.arena.deinit();
-            }
-        };
+        // Hoisted to `renderer/DerivedConfig.zig` so it is one canonical
+        // type shared across backends (and across runtime-selected
+        // renderer variants) rather than a distinct nested type per
+        // `GraphicsAPI` instantiation. Re-exported here so existing
+        // `Renderer.DerivedConfig` references keep resolving.
+        pub const DerivedConfig = @import("DerivedConfig.zig").DerivedConfig;
 
         pub fn init(alloc: Allocator, options: renderer.Options) !Self {
             // Initialize our graphics API wrapper, this will prepare the
@@ -841,15 +729,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // Load our custom shaders.
             //
             // GraphicsAPI advertises whether it can actually run them
-            // (`supports_custom_shaders`). The Vulkan backend currently
-            // can't — its post-pass / compositor pipeline that wires
-            // CustomShaderState.back_texture → frame.target through the
-            // user's shader hasn't been built yet. Loading + flagging
-            // `has_custom_shaders` anyway would route bg_color into the
-            // back_texture and leave frame.target blank. Skip the load
-            // when the backend can't consume the result, and emit a
-            // one-line warning so the user knows their config item was
-            // ignored.
+            // (`supports_custom_shaders`). A backend that can't — one
+            // whose post-pass / compositor pipeline wiring
+            // CustomShaderState.back_texture → frame.target isn't built —
+            // would, if we loaded + flagged `has_custom_shaders` anyway,
+            // route bg_color into the back_texture and leave frame.target
+            // blank. Skip the load when the backend can't consume the
+            // result, and emit a one-line warning so the user knows their
+            // config item was ignored.
             const can_use_custom = !@hasDecl(GraphicsAPI, "supports_custom_shaders") or
                 GraphicsAPI.supports_custom_shaders;
             const custom_shaders: []const []const u8 = if (can_use_custom)
@@ -878,8 +765,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             else custom: {
                 if (self.config.custom_shaders.value.items.len > 0) {
                     log.warn(
-                        "custom-shader config ignored: backend lacks " ++
-                            "post-pipeline support (Vulkan TODO)",
+                        "custom-shader config ignored: this renderer " ++
+                            "backend lacks post-pipeline support",
                         .{},
                     );
                 }
@@ -1520,7 +1407,16 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             // Wait for a frame to be available.
             const frame = try self.swap_chain.nextFrame();
-            errdefer self.swap_chain.releaseFrame();
+            // The frame's swap-chain permit must be released exactly once.
+            // Once a frame context exists, `frame_ctx.complete` (→
+            // frameCompleted → releaseFrame) owns that release; before then,
+            // this errdefer covers an early error (shader reinit / atlas
+            // sync / beginFrame). Without the `frame_released` guard, an
+            // error AFTER `complete` is deferred would release twice and
+            // over-post the semaphore → a future nextFrame could reuse a
+            // frame the GPU isn't done with.
+            var frame_released = false;
+            errdefer if (!frame_released) self.swap_chain.releaseFrame();
             // log.debug("drawing frame index={}", .{self.swap_chain.frame_index});
 
             // If we need to reinitialize our shaders, do so.
@@ -1616,6 +1512,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             // Get a frame context from the graphics API.
             var frame_ctx = try self.api.beginFrame(self, &frame.target);
+            // `complete` (always called via this defer) now owns the
+            // swap-chain permit release, so the errdefer above must not
+            // also release it.
+            frame_released = true;
             defer frame_ctx.complete(sync);
 
             {
@@ -1835,7 +1735,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     },
                 };
 
-                const image: imagepkg.Image = .{
+                const image: ImagePkg.Image = .{
                     .pending = .{
                         .width = image_data.width,
                         .height = image_data.height,
