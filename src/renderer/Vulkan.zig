@@ -51,6 +51,12 @@ const font = @import("../font/main.zig");
 const rendererpkg = @import("../renderer.zig");
 const shadertoy = @import("shadertoy.zig");
 
+/// The concrete generic renderer that owns this backend. Used for the
+/// back-pointer `beginFrame` receives (mirrors OpenGL.zig). NOT
+/// `rendererpkg.Renderer`, which is the runtime-selected union — the
+/// owner is always this backend's `GenericRenderer`.
+const Renderer = rendererpkg.GenericRenderer(Vulkan);
+
 pub const GraphicsAPI = Vulkan;
 // Device-dispatch primitives live in `pkg/vulkan/` so they can be
 // reused by anything that needs a typed Vulkan binding (mirrors how
@@ -440,7 +446,7 @@ pub fn presentLastTarget(self: *Vulkan) !void {
 
 pub fn beginFrame(
     self: *const Vulkan,
-    renderer: *rendererpkg.Renderer,
+    renderer: *Renderer,
     target: *Target,
 ) !Frame {
     _ = self;
