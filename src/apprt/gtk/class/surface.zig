@@ -23,25 +23,29 @@ const ext = @import("../ext.zig");
 const gsettings = @import("../gsettings.zig");
 const gtk_key = @import("../key.zig");
 const ApprtSurface = @import("../Surface.zig");
-const vulkan_host = if (build_config.renderer == .vulkan)
+/// Whether the Vulkan backend is compiled into this build. When true the
+/// Vulkan render integration (host, DmabufPaintable, dmabuf present path)
+/// is compiled in and used when Vulkan is the *active* backend at runtime
+/// (`renderer.activeBackend() == .vulkan`). When false these collapse to
+/// `void` and only the OpenGL integration exists. (GTK/Linux compiles
+/// both; see `renderer.compiledIn`.)
+const vulkan_compiled = renderer.compiledIn(.vulkan);
+const vulkan_host = if (vulkan_compiled)
     @import("../vulkan/Host.zig")
 else
     void;
-const DmabufPaintable = if (build_config.renderer == .vulkan)
+const DmabufPaintable = if (vulkan_compiled)
     @import("../vulkan/DmabufPaintable.zig").DmabufPaintable
 else
     void;
-/// The widget backing the rendered surface. It drives surface init/
-/// sizing (its `resize` signal) and holds keyboard focus. OpenGL uses a
-/// GtkGLArea (the terminal is drawn into its GL context); Vulkan uses a
-/// plain GtkDrawingArea — the Vulkan renderer presents through
-/// `present_picture` + the DmabufPaintable and has no use for a GLArea's
-/// GdkGLContext, so a DrawingArea avoids creating an unused GL context
-/// per surface. Built in code (see `init`) so the type can vary.
-const RenderWidget = if (build_config.renderer == .vulkan)
-    gtk.DrawingArea
-else
-    gtk.GLArea;
+
+/// The render widget backing the surface drives sizing (its `resize`
+/// signal) and holds keyboard focus. When the active backend is OpenGL
+/// it's a GtkGLArea (the terminal draws into its GL context); when Vulkan
+/// it's a plain GtkDrawingArea (the renderer presents through
+/// `present_picture` + the DmabufPaintable, so a GLArea's GdkGLContext
+/// would be wasted). Because a single build can have both backends, the
+/// widget is built at runtime in `init` and stored as a base `*gtk.Widget`.
 const Common = @import("../class.zig").Common;
 const Application = @import("application.zig").Application;
 const Config = @import("config.zig").Config;
@@ -637,12 +641,14 @@ pub const Surface = extern struct {
         /// shows up taking the full bounds of a split view.
         zoom: bool = false,
 
-        /// The widget that renders the actual surface (a GtkGLArea on
-        /// OpenGL, a GtkDrawingArea on Vulkan — see `RenderWidget`).
-        /// Built and wired in `init` and installed as `render_overlay`'s
-        /// main child; not a template binding, so it is owned by the
-        /// widget tree (no manual unref).
-        gl_area: *RenderWidget,
+        /// The widget that renders the actual surface — a GtkGLArea
+        /// (OpenGL) or GtkDrawingArea (Vulkan), decided at runtime by the
+        /// active backend. Stored as a base `*gtk.Widget`; OpenGL-only
+        /// call sites cast to `*gtk.GLArea` (safe because that path only
+        /// runs when OpenGL is active). Built and wired in `init` and
+        /// installed as `render_overlay`'s main child; not a template
+        /// binding, so it is owned by the widget tree (no manual unref).
+        gl_area: *gtk.Widget,
 
         /// The inner Overlay that stacks `present_picture` over the
         /// render widget. Bound from the template; `gl_area` is added as
@@ -656,14 +662,14 @@ pub const Surface = extern struct {
         /// it in the inner Overlay) covers it.
         present_picture: *gtk.Picture,
 
-        /// Per-surface DmabufPaintable backing `present_picture`.
-        /// Strong ref; freed in `dispose`. Vulkan builds only;
-        /// `void` on OpenGL builds so the field collapses out of
-        /// the Private layout.
-        dmabuf_paintable: if (build_config.renderer == .vulkan)
-            *DmabufPaintable
+        /// Per-surface DmabufPaintable backing `present_picture`. Present
+        /// when the Vulkan backend is compiled in; `null` until the ctor
+        /// creates it (only when Vulkan is the active backend), and freed
+        /// in `dispose`. Collapses to `void` when Vulkan isn't compiled.
+        dmabuf_paintable: if (vulkan_compiled)
+            ?*DmabufPaintable
         else
-            void = if (build_config.renderer == .vulkan) undefined else {},
+            void = if (vulkan_compiled) null else {},
 
         /// The labels for the left/right sides of the URL hover tooltip.
         url_left: *gtk.Label,
@@ -864,15 +870,21 @@ pub const Surface = extern struct {
     /// then we should force a redraw.
     pub fn redraw(self: *Self) void {
         const priv = self.private();
-        if (build_config.renderer == .vulkan) {
+        if (renderer.activeBackend() == .vulkan) {
             // Vulkan presents via the renderer thread + DmabufPaintable;
             // there's no GLArea to queue. Queue a repaint of the picture
             // so GTK re-snapshots the current frame after an external
             // invalidation (e.g. reparenting).
             priv.present_picture.as(gtk.Widget).queueDraw();
         } else {
-            priv.gl_area.queueRender();
+            gtkGLArea(priv.gl_area).queueRender();
         }
+    }
+
+    /// Downcast the render widget to a GtkGLArea. Valid only when OpenGL
+    /// is the active backend (the widget is built as a GtkGLArea then).
+    fn gtkGLArea(w: *gtk.Widget) *gtk.GLArea {
+        return gobject.ext.cast(gtk.GLArea, w).?;
     }
 
     /// Callback used to determine whether border should be shown around the
@@ -1840,63 +1852,71 @@ pub const Surface = extern struct {
 
         const priv = self.private();
 
-        // Build the render widget in code rather than the template so its
-        // type can vary by renderer (see `RenderWidget`): a GtkGLArea on
-        // OpenGL, a GtkDrawingArea on Vulkan (no GdkGLContext). Both
-        // provide the `resize` signal that drives surface init/sizing and
-        // accept keyboard focus; the input event controllers live on the
-        // parent Box (see `surface.blp`), so they work for either type.
-        // Installed as `render_overlay`'s main child, below
-        // `present_picture`.
-        const render_widget = RenderWidget.new();
-        priv.gl_area = render_widget;
-        {
-            const widget = render_widget.as(gtk.Widget);
-            widget.setHexpand(1);
-            widget.setVexpand(1);
-            widget.setFocusable(1);
-            widget.setFocusOnClick(1);
+        // Whether Vulkan is the active backend for this process. Comptime
+        // false when Vulkan isn't compiled (so the Vulkan branches below
+        // — DmabufPaintable, vulkan_host — are dead and never analyzed);
+        // otherwise a runtime check of the selected backend.
+        const vulkan_active = vulkan_compiled and renderer.activeBackend() == .vulkan;
 
-            _ = gtk.Widget.signals.realize.connect(render_widget, *Self, &glareaRealize, self, .{});
-            _ = gtk.Widget.signals.unrealize.connect(render_widget, *Self, &glareaUnrealize, self, .{});
-            _ = gtk.Widget.signals.map.connect(render_widget, *Self, &glareaMap, self, .{});
-            _ = gtk.Widget.signals.unmap.connect(render_widget, *Self, &glareaUnmap, self, .{});
-            _ = RenderWidget.signals.resize.connect(render_widget, *Self, &glareaResize, self, .{});
-
-            if (build_config.renderer != .vulkan) {
-                // OpenGL: configure the GL context and the render signal.
-                render_widget.setHasStencilBuffer(0);
-                render_widget.setHasDepthBuffer(0);
-                render_widget.setAllowedApis(.{ .gl = true });
-                _ = gtk.GLArea.signals.render.connect(render_widget, *Self, &glareaRender, self, .{});
+        // Build the render widget in code (not the template) because its
+        // type depends on the active backend and a single build may have
+        // both: GtkGLArea on OpenGL (terminal draws into its GL context),
+        // GtkDrawingArea on Vulkan (renderer presents via present_picture
+        // + DmabufPaintable, so a GLArea's GdkGLContext would be wasted).
+        // Both provide the `resize` signal that drives surface init/sizing
+        // and accept keyboard focus; input controllers live on the parent
+        // Box (surface.blp). Installed as render_overlay's main child,
+        // below present_picture. It must stay visible/allocated — a hidden
+        // GTK widget gets no size allocation, so no `resize`, so the
+        // surface never initializes.
+        // The per-type `resize`/`render` signals require the concrete
+        // widget instance (GTK's typed `connect` can't downcast a base
+        // *gtk.Widget), so connect them while we still have the concrete
+        // type, then store/reuse the base *gtk.Widget for everything else.
+        const render_widget: *gtk.Widget = rw: {
+            if (vulkan_active) {
+                const da = gtk.DrawingArea.new();
+                _ = gtk.DrawingArea.signals.resize.connect(da, *Self, &drawingAreaResize, self, .{});
+                break :rw da.as(gtk.Widget);
+            } else {
+                const gla = gtk.GLArea.new();
+                // OpenGL: configure the GL context + resize/render signals.
+                gla.setHasStencilBuffer(0);
+                gla.setHasDepthBuffer(0);
+                gla.setAllowedApis(.{ .gl = true });
+                _ = gtk.GLArea.signals.resize.connect(gla, *Self, &glareaResize, self, .{});
+                _ = gtk.GLArea.signals.render.connect(gla, *Self, &glareaRender, self, .{});
+                break :rw gla.as(gtk.Widget);
             }
+        };
+        priv.gl_area = render_widget;
+        render_widget.setHexpand(1);
+        render_widget.setVexpand(1);
+        render_widget.setFocusable(1);
+        render_widget.setFocusOnClick(1);
 
-            priv.render_overlay.setChild(widget);
-        }
+        // Widget-level lifecycle signals work for either widget type.
+        _ = gtk.Widget.signals.realize.connect(render_widget, *Self, &glareaRealize, self, .{});
+        _ = gtk.Widget.signals.unrealize.connect(render_widget, *Self, &glareaUnrealize, self, .{});
+        _ = gtk.Widget.signals.map.connect(render_widget, *Self, &glareaMap, self, .{});
+        _ = gtk.Widget.signals.unmap.connect(render_widget, *Self, &glareaUnmap, self, .{});
 
-        // Vulkan-only widget wiring: stand up the per-surface
-        // DmabufPaintable and attach it to `present_picture` (which
-        // is overlaid on top of the render widget — see `surface.blp`).
-        // Done before populating `priv.rt_surface` so `userdata` for
-        // the platform callbacks points at the live paintable.
-        //
-        // The render widget (a DrawingArea on Vulkan) sits behind
-        // `present_picture` and renders nothing itself; the dmabuf frames
-        // show through the Picture. It must stay visible/allocated: a
-        // hidden GTK widget gets no size allocation (so no `resize`, so
-        // the surface never initializes) — that's what left the window
-        // transparent before this was built in code.
-        if (build_config.renderer == .vulkan) {
+        priv.render_overlay.setChild(render_widget);
+
+        // Vulkan-active widget wiring: stand up the per-surface
+        // DmabufPaintable and attach it to `present_picture` (overlaid on
+        // top of the render widget). Done before populating
+        // `priv.rt_surface` so the platform callbacks' `userdata` points
+        // at the live paintable.
+        if (vulkan_active) {
             const paintable = DmabufPaintable.new();
             priv.dmabuf_paintable = paintable;
             priv.present_picture.setPaintable(paintable.as(gdk.Paintable));
 
-            // The shared error_page template is written for the OpenGL
-            // renderer ("Unable to acquire an OpenGL context", plus a
-            // GTK-OpenGL help link). On a Vulkan build that text is
-            // misleading, so retarget it: a Vulkan-specific message and
-            // no GL-specific help link. The page is only shown if
-            // surface init fails (see `initSurface`'s catch).
+            // The shared error_page template is OpenGL-worded ("Unable to
+            // acquire an OpenGL context", + a GTK-OpenGL help link).
+            // Retarget it for Vulkan; it's only shown if surface init
+            // fails (see `initSurface`'s catch).
             priv.error_page.setDescription(
                 "Unable to initialize Vulkan for rendering. Your GPU or " ++
                     "driver may not support the required Vulkan 1.3 features " ++
@@ -1907,13 +1927,13 @@ pub const Surface = extern struct {
         }
 
         // Initialize some private fields so they aren't undefined
-        priv.rt_surface = if (build_config.renderer == .vulkan) .{
+        priv.rt_surface = if (vulkan_active) .{
             .surface = self,
             // `userdata` is the per-surface DmabufPaintable.
             // libghostty passes it back to `cbPresent`, which
             // calls `setTexture` on it directly — no detour
             // through the GObject Surface.
-            .platform = vulkan_host.asPlatform(@ptrCast(priv.dmabuf_paintable)),
+            .platform = vulkan_host.asPlatform(@ptrCast(priv.dmabuf_paintable.?)),
         } else .{
             .surface = self,
         };
@@ -2033,8 +2053,8 @@ pub const Surface = extern struct {
         // disposed below it'll drop its ref too, and the paintable
         // finalizes — which drops the texture, which drops the
         // dup'd dmabuf fd.
-        if (build_config.renderer == .vulkan) {
-            priv.dmabuf_paintable.as(gobject.Object).unref();
+        if (vulkan_compiled) {
+            if (priv.dmabuf_paintable) |p| p.as(gobject.Object).unref();
         }
 
         // This works around a GTK double-free bug where if you bind
@@ -3361,7 +3381,7 @@ pub const Surface = extern struct {
     }
 
     fn glareaRealize(
-        _: *RenderWidget,
+        _: *gtk.Widget,
         self: *Self,
     ) callconv(.c) void {
         log.debug("realize", .{});
@@ -3369,19 +3389,18 @@ pub const Surface = extern struct {
         const priv = self.private();
 
         // OpenGL-only: bring the GL context current and notify the
-        // renderer. The Vulkan renderer doesn't use this widget's
-        // GL context — it owns its own VkDevice (see
-        // `apprt/gtk/vulkan/Host.zig`) — and `displayRealized` /
-        // `displayUnrealized` are no-ops on Vulkan, so we skip the
-        // whole block. We still need to set up the input method
-        // below, since the GLArea is the focus widget regardless
-        // of the renderer.
-        if (build_config.renderer != .vulkan) {
+        // renderer. On Vulkan the render widget is a plain DrawingArea
+        // with no GL context (the renderer owns its own VkDevice, see
+        // `apprt/gtk/vulkan/Host.zig`), so we skip this block. We still
+        // set up the input method below, since the render widget is the
+        // focus widget regardless of the backend.
+        if (renderer.activeBackend() != .vulkan) {
+            const gl_area = gtkGLArea(priv.gl_area);
             // Make the GL area current so we can detect any OpenGL errors. If
             // we have errors here we can't render and we switch to the error
             // state.
-            priv.gl_area.makeCurrent();
-            if (priv.gl_area.getError()) |err| {
+            gl_area.makeCurrent();
+            if (gl_area.getError()) |err| {
                 log.warn("failed to make GL context current: {s}", .{err.f_message orelse "(no message)"});
                 log.warn("this error is almost always due to a library, driver, or GTK issue", .{});
                 log.warn("this is a common cause of this issue: https://ghostty.org/docs/help/gtk-opengl-context", .{});
@@ -3409,7 +3428,7 @@ pub const Surface = extern struct {
     }
 
     fn glareaUnrealize(
-        gl_area: *RenderWidget,
+        widget: *gtk.Widget,
         self: *Self,
     ) callconv(.c) void {
         log.debug("unrealize", .{});
@@ -3417,9 +3436,10 @@ pub const Surface = extern struct {
         const priv = self.private();
 
         // See `glareaRealize` for why this is OpenGL-only.
-        if (build_config.renderer != .vulkan) {
+        if (renderer.activeBackend() != .vulkan) {
             // Notify our core surface
             if (priv.core_surface) |surface| {
+                const gl_area = gtkGLArea(widget);
                 // There is no guarantee that our GLArea context is current
                 // when unrealize is emitted, so we need to make it current.
                 gl_area.makeCurrent();
@@ -3447,7 +3467,7 @@ pub const Surface = extern struct {
     }
 
     fn glareaMap(
-        _: *RenderWidget,
+        _: *gtk.Widget,
         self: *Self,
     ) callconv(.c) void {
         self.updateMapped(true);
@@ -3455,7 +3475,7 @@ pub const Surface = extern struct {
     }
 
     fn glareaUnmap(
-        _: *RenderWidget,
+        _: *gtk.Widget,
         self: *Self,
     ) callconv(.c) void {
         self.updateMapped(false);
@@ -3481,11 +3501,11 @@ pub const Surface = extern struct {
         self: *Self,
     ) callconv(.c) c_int {
         // On Vulkan the render widget is a GtkDrawingArea with no
-        // `render` signal, so this handler is only connected on OpenGL
-        // (see `init`). The guard is defensive: the Vulkan renderer
-        // presents on its own thread through the DmabufPaintable, and
-        // drawing here would race it.
-        if (build_config.renderer == .vulkan) return 1;
+        // `render` signal, so this handler is only connected when OpenGL
+        // is active (see `init`). The guard is defensive: the Vulkan
+        // renderer presents on its own thread through the DmabufPaintable,
+        // and drawing here would race it.
+        if (renderer.activeBackend() == .vulkan) return 1;
 
         // If we don't have a surface then we failed to initialize for
         // some reason and there's nothing to draw to the GLArea.
@@ -3500,18 +3520,36 @@ pub const Surface = extern struct {
         return 1;
     }
 
+    // GTK's typed signal `connect` needs the concrete instance type, and
+    // the render widget can be a GtkGLArea or GtkDrawingArea, so each has
+    // a thin wrapper that forwards to the shared `resizeImpl`.
     fn glareaResize(
-        gl_area: *RenderWidget,
+        _: *gtk.GLArea,
         width: c_int,
         height: c_int,
         self: *Self,
     ) callconv(.c) void {
+        self.resizeImpl(width, height);
+    }
+
+    fn drawingAreaResize(
+        _: *gtk.DrawingArea,
+        width: c_int,
+        height: c_int,
+        self: *Self,
+    ) callconv(.c) void {
+        self.resizeImpl(width, height);
+    }
+
+    fn resizeImpl(self: *Self, width: c_int, height: c_int) void {
+        const priv = self.private();
+        const gl_area = priv.gl_area; // *gtk.Widget
+
         // Some debug output to help understand what GTK is telling us.
         {
-            const widget = gl_area.as(gtk.Widget);
-            const scale_factor = widget.getScaleFactor();
+            const scale_factor = gl_area.getScaleFactor();
             const window_scale_factor = scale: {
-                const root = widget.getRoot() orelse break :scale 0;
+                const root = gl_area.getRoot() orelse break :scale 0;
                 const gtk_native = root.as(gtk.Native);
                 const gdk_surface = gtk_native.getSurface() orelse break :scale 0;
                 break :scale gdk_surface.getScaleFactor();
@@ -3525,17 +3563,14 @@ pub const Surface = extern struct {
             });
         }
 
-        // Store our cached size
-        const priv = self.private();
-
         // GtkGLArea's `resize` reports device pixels (already multiplied
         // by the scale factor), but GtkDrawingArea's reports logical
         // pixels. The core surface and the Vulkan dmabuf must be sized in
         // device pixels, so scale up on the DrawingArea (Vulkan) path;
         // `present_picture`'s content-fit:fill then maps the device-sized
         // texture 1:1. OpenGL is already device-sized, so leave it alone.
-        const size_scale: c_int = if (build_config.renderer == .vulkan)
-            gl_area.as(gtk.Widget).getScaleFactor()
+        const size_scale: c_int = if (renderer.activeBackend() == .vulkan)
+            gl_area.getScaleFactor()
         else
             1;
         const new_size: apprt.SurfaceSize = .{
@@ -3590,8 +3625,8 @@ pub const Surface = extern struct {
         // OpenGL needs a current GL context before any surface operation.
         // The Vulkan renderer owns its own VkDevice and the render widget
         // is a plain DrawingArea with no GL context, so this is skipped.
-        if (build_config.renderer != .vulkan) {
-            const gl_area = priv.gl_area;
+        if (renderer.activeBackend() != .vulkan) {
+            const gl_area = gtkGLArea(priv.gl_area);
             gl_area.makeCurrent();
             if (gl_area.getError()) |err| {
                 log.warn("failed to make GL context current: {s}", .{err.f_message orelse "(no message)"});
@@ -3813,8 +3848,9 @@ pub const Surface = extern struct {
             class.bindTemplateCallback("scroll_horizontal", &ecMouseScrollHorizontal);
             class.bindTemplateCallback("drop", &dtDrop);
             // The render widget (gl_area) is built and its signals are
-            // connected in `init` (see `RenderWidget`), not via the
-            // template, so it has no `bindTemplateCallback` entries.
+            // connected at runtime in `init` (GLArea or DrawingArea per
+            // the active backend), not via the template, so it has no
+            // `bindTemplateCallback` entries.
             class.bindTemplateCallback("im_preedit_start", &imPreeditStart);
             class.bindTemplateCallback("im_preedit_changed", &imPreeditChanged);
             class.bindTemplateCallback("im_preedit_end", &imPreeditEnd);

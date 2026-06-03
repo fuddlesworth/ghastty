@@ -651,8 +651,8 @@ comptime {
     // on a non-Vulkan build is a project misconfiguration. Keep the
     // assertion narrow — only the actual import sites should opt
     // into Vulkan-renderer-conditional compilation.
-    if (@import("../../../build_config.zig").renderer != .vulkan) {
-        @compileError("apprt/gtk/vulkan/Host.zig may only be imported on -Drenderer=vulkan builds");
+    if (!@import("../../../renderer.zig").compiledIn(.vulkan)) {
+        @compileError("apprt/gtk/vulkan/Host.zig may only be imported when the Vulkan backend is compiled in");
     }
 }
 

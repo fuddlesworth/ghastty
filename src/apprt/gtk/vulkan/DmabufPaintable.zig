@@ -212,7 +212,7 @@ pub const DmabufPaintable = extern struct {
 };
 
 comptime {
-    if (@import("../../../build_config.zig").renderer != .vulkan) {
-        @compileError("DmabufPaintable.zig may only be imported on -Drenderer=vulkan builds");
+    if (!@import("../../../renderer.zig").compiledIn(.vulkan)) {
+        @compileError("DmabufPaintable.zig may only be imported when the Vulkan backend is compiled in");
     }
 }

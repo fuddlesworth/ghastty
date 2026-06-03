@@ -31,8 +31,11 @@ pub const App = struct {
     /// Whether drawing must happen on the app (GUI) thread rather than a
     /// dedicated renderer thread. The OpenGL renderer renders into the
     /// host's GL context, which the host owns on its GUI thread (e.g. a
-    /// QOpenGLWidget); Metal keeps its own renderer thread.
-    pub const must_draw_from_app_thread = build_config.renderer == .opengl;
+    /// QOpenGLWidget); Metal keeps its own renderer thread. A function
+    /// (not a const) so it tracks the runtime-selected backend.
+    pub fn mustDrawFromAppThread() bool {
+        return renderer.activeBackend() == .opengl;
+    }
 
     /// Because we only expect the embedding API to be used in embedded
     /// environments, the options are extern so that we can expose it

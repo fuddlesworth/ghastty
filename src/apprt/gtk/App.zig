@@ -15,6 +15,7 @@ const Surface = @import("Surface.zig");
 const ipcNewWindow = @import("ipc/new_window.zig").newWindow;
 const ipcToggleQuickTerminal = @import("ipc/toggle_quick_terminal.zig").toggleQuickTerminal;
 const build_config = @import("../../build_config.zig");
+const rendererpkg = @import("../../renderer.zig");
 
 const log = std.log.scoped(.gtk);
 
@@ -26,9 +27,13 @@ const log = std.log.scoped(.gtk);
 /// per-surface `DmabufPaintable`, which is thread-safe by design
 /// (atomic texture swap + `gdk.Paintable.invalidateContents` queues
 /// the GUI-thread redraw internally). The renderer thread can drive
-/// drawing directly, mirroring the embedded apprt's pattern where
-/// `must_draw_from_app_thread = (build_config.renderer == .opengl)`.
-pub const must_draw_from_app_thread = build_config.renderer == .opengl;
+/// drawing directly. Runtime now that a build can contain both backends
+/// and the renderer is chosen at runtime: OpenGL must draw on the GUI
+/// thread (its GL context lives there), Vulkan draws on the renderer
+/// thread (presents via dmabuf).
+pub fn mustDrawFromAppThread() bool {
+    return rendererpkg.activeBackend() == .opengl;
+}
 
 /// GTK application ID
 pub const application_id = @import("build/info.zig").application_id;

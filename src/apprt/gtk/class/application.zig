@@ -9,7 +9,8 @@ const gobject = @import("gobject");
 const gtk = @import("gtk");
 
 const build_config = @import("../../../build_config.zig");
-const vulkan_host = if (build_config.renderer == .vulkan)
+const rendererpkg = @import("../../../renderer.zig");
+const vulkan_host = if (rendererpkg.compiledIn(.vulkan))
     @import("../vulkan/Host.zig")
 else
     void;
@@ -466,7 +467,7 @@ pub const Application = extern struct {
         // renderer thread (which borrows the host's VkDevice/Instance)
         // is joined. No-op + idempotent if Vulkan was never brought up
         // or deinit runs twice (terminate() then finalize()).
-        if (build_config.renderer == .vulkan) vulkan_host.deinit();
+        if (rendererpkg.compiledIn(.vulkan)) vulkan_host.deinit();
     }
 
     /// The global allocator that all other classes should use by
@@ -2863,7 +2864,7 @@ fn setGtkEnv(config: *const CoreConfig) error{NoSpaceLeft}!void {
     // default below, kept for the OpenGL renderer where GDK Vulkan is
     // just startup overhead) leaves the GtkPicture with no usable
     // paintable and the window renders fully transparent.
-    const want_vulkan = build_config.renderer == .vulkan;
+    const want_vulkan = rendererpkg.activeBackend() == .vulkan;
 
     var gdk_debug: struct {
         /// output OpenGL debug information
