@@ -12,14 +12,15 @@ const VulkanSpv = @import("VulkanSpv.zig");
 const DistResource = @import("GhosttyDist.zig").Resource;
 const Backend = @import("../renderer/backend.zig").Backend;
 
-/// Whether backend `b`'s build deps should be linked/generated. GTK on
-/// Linux/BSD compiles BOTH OpenGL and Vulkan so the renderer can be
-/// chosen at runtime (with OpenGL fallback); every other target /
-/// app-runtime keeps the single configured backend. Must stay in lockstep
+/// Whether backend `b`'s build deps should be linked/generated. On
+/// Linux/BSD both the GTK and embedded (`none`) app-runtimes compile BOTH
+/// OpenGL and Vulkan so the renderer can be chosen at runtime (GTK: config
+/// + probe with OpenGL fallback; embedded: host's `renderer` config).
+/// Darwin/wasm keep the single configured backend. Must stay in lockstep
 /// with `renderer.zig`'s `compiledIn`.
 fn rendererCompiled(cfg: *const Config, comptime b: Backend) bool {
     const t = cfg.target.result;
-    if (cfg.app_runtime == .gtk and
+    if ((cfg.app_runtime == .gtk or cfg.app_runtime == .none) and
         !t.os.tag.isDarwin() and
         t.cpu.arch != .wasm32 and
         t.cpu.arch != .wasm64)

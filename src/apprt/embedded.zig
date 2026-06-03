@@ -148,6 +148,29 @@ pub const App = struct {
         var keymap = try input.Keymap.init();
         errdefer keymap.deinit();
 
+        // Select the renderer backend at runtime from config. On Linux
+        // the embedded lib compiles both OpenGL + Vulkan; the host (e.g.
+        // the Qt frontend) picks via `renderer` and supplies the matching
+        // platform_tag + callbacks per surface. There's no in-process
+        // probe — the host owns the Vulkan device. Must run before any
+        // surface is created (here, at app init). `.auto` keeps the build
+        // default; Darwin/wasm only compile one backend so a mismatch
+        // just logs and keeps the default.
+        switch (config.renderer) {
+            .auto => {},
+            inline .opengl, .vulkan, .metal => |tag| {
+                const b: renderer.Backend = @field(renderer.Backend, @tagName(tag));
+                if (renderer.compiledIn(b)) {
+                    renderer.setActiveBackend(b);
+                } else {
+                    log.warn(
+                        "configured renderer={s} is not compiled in; using {s}",
+                        .{ @tagName(tag), @tagName(renderer.activeBackend()) },
+                    );
+                }
+            },
+        }
+
         self.* = .{
             .core_app = core_app,
             .config = config_clone,
@@ -1633,6 +1656,36 @@ pub const CAPI = struct {
     comptime {
         if (builtin.target.os.tag.isDarwin()) {
             _ = Darwin;
+        }
+    }
+
+    /// Select the renderer backend at runtime, by platform tag
+    /// (GHOSTTY_PLATFORM_OPENGL / GHOSTTY_PLATFORM_VULKAN). The host
+    /// (e.g. the Qt frontend) calls this after probing which backend it
+    /// can drive — and before creating any surface — so the renderer the
+    /// core constructs matches the `platform_tag` + callbacks the host
+    /// will supply per surface. Overrides the `renderer` config that
+    /// `App.init` applied. No-op (with a warning) if that backend isn't
+    /// compiled in (e.g. Vulkan requested on a Darwin/Metal build).
+    export fn ghostty_set_renderer(platform: c_int) void {
+        switch (platform) {
+            @intFromEnum(PlatformTag.opengl) => applyBackend(.opengl),
+            @intFromEnum(PlatformTag.vulkan) => applyBackend(.vulkan),
+            else => log.warn(
+                "ghostty_set_renderer: platform tag {d} has no renderer backend",
+                .{platform},
+            ),
+        }
+    }
+
+    fn applyBackend(comptime b: renderer.Backend) void {
+        if (comptime renderer.compiledIn(b)) {
+            renderer.setActiveBackend(b);
+        } else {
+            log.warn(
+                "ghostty_set_renderer: backend {s} is not compiled in; keeping {s}",
+                .{ @tagName(b), @tagName(renderer.activeBackend()) },
+            );
         }
     }
 

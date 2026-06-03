@@ -44,17 +44,22 @@ pub const lib = @import("lib/main.zig");
 
 /// Whether backend `b` is compiled into this build.
 ///
-/// GTK on Linux/BSD compiles BOTH the OpenGL and Vulkan backends so the
-/// renderer can be selected at runtime (with OpenGL fallback). Every
-/// other target / app-runtime keeps the single configured backend
-/// (`build_config.renderer`). This must stay in lockstep with the
-/// build-system's dep linking (`SharedDeps.rendererCompiled`).
+/// On Linux/BSD, both the GTK app-runtime and the embedded app-runtime
+/// (`none` — the libghostty the Qt frontend links) compile BOTH the
+/// OpenGL and Vulkan backends so the renderer can be selected at runtime:
+///   - GTK picks per config + Vulkan probe (with OpenGL fallback).
+///   - embedded picks per the host's `renderer` config (the host supplies
+///     the matching platform_tag + callbacks per surface).
+/// Darwin (macOS/iOS) stays Metal-only and wasm WebGL-only — i.e. the
+/// single configured backend (`build_config.renderer`). This must stay in
+/// lockstep with the build-system's dep linking
+/// (`SharedDeps.rendererCompiled`).
 ///
 /// The apprt uses this (comptime) to decide which render integrations to
 /// compile in; `activeBackend()` (runtime) decides which one to use.
 pub fn compiledIn(comptime b: Backend) bool {
     const t = builtin.target;
-    if (build_config.app_runtime == .gtk and
+    if ((build_config.app_runtime == .gtk or build_config.app_runtime == .none) and
         !t.os.tag.isDarwin() and
         t.cpu.arch != .wasm32 and
         t.cpu.arch != .wasm64)

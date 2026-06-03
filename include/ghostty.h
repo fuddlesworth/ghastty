@@ -1201,6 +1201,13 @@ GHOSTTY_API uint32_t ghostty_config_diagnostics_count(ghostty_config_t);
 GHOSTTY_API ghostty_diagnostic_s ghostty_config_get_diagnostic(ghostty_config_t, uint32_t);
 GHOSTTY_API ghostty_string_s ghostty_config_open_path(void);
 
+// Select the renderer backend at runtime (GHOSTTY_PLATFORM_OPENGL or
+// GHOSTTY_PLATFORM_VULKAN). Call after probing which backend the host can
+// drive and BEFORE creating any surface, so the renderer the core builds
+// matches the platform_tag + callbacks supplied per surface. No-op if the
+// backend isn't compiled into this libghostty (e.g. Vulkan on Metal).
+GHOSTTY_API void ghostty_set_renderer(ghostty_platform_e);
+
 GHOSTTY_API ghostty_app_t ghostty_app_new(const ghostty_runtime_config_s*,
                                              ghostty_config_t);
 GHOSTTY_API void ghostty_app_free(ghostty_app_t);
