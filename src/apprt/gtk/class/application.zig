@@ -2923,8 +2923,9 @@ fn setGtkEnv(config: *const CoreConfig) error{NoSpaceLeft}!void {
         // GTK's new renderer can cause blurry font when using fractional scaling.
         @"gl-no-fractional": bool = false,
         /// Disabling Vulkan can improve startup times by hundreds of
-        /// milliseconds on some systems. We don't use Vulkan so we can just
-        /// disable it.
+        /// milliseconds on some systems, so we disable it for the OpenGL
+        /// renderer. It is kept enabled on the Vulkan renderer (see the
+        /// `want_vulkan` handling above), which needs GDK's Vulkan backend.
         @"vulkan-disable": bool = false,
     } = .{
         // `gtk-opengl-debug` dumps logs directly to stderr so both must be true
@@ -2939,8 +2940,9 @@ fn setGtkEnv(config: *const CoreConfig) error{NoSpaceLeft}!void {
         /// gtk issue: https://gitlab.gnome.org/GNOME/gtk/-/issues/6864
         @"color-mgmt": bool = true,
         /// Disabling Vulkan can improve startup times by hundreds of
-        /// milliseconds on some systems. We don't use Vulkan so we can just
-        /// disable it.
+        /// milliseconds on some systems, so we disable it for the OpenGL
+        /// renderer. It is kept enabled on the Vulkan renderer (see the
+        /// `want_vulkan` handling above), which needs GDK's Vulkan backend.
         vulkan: bool = false,
     } = .{};
 
