@@ -203,9 +203,10 @@ public:
   // GUI-thread drain step: hands the most recent pending frame
   // either to the SubsurfacePresenter (zero-copy path) or the
   // QImage paint pipeline (fallback). Idempotent: returns
-  // immediately if nothing's pending. Invoked from the polling
-  // safety net AND from queued invocations triggered by the
-  // renderer thread.
+  // immediately if nothing's pending. Invoked from the queued
+  // invocations the renderer thread posts via
+  // QMetaObject::invokeMethod, and synchronously from the resize
+  // path (the earlier safety-net polling timer was removed).
   Q_INVOKABLE void drainVulkan();
 
   // Compositor frame-callback handler. Fires (on the GUI thread,

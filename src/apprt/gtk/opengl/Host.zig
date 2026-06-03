@@ -54,6 +54,10 @@ pub const Surface = struct {
 /// True if the OpenGL dmabuf-export path can be used: libEGL is present,
 /// we're on a Wayland display with an EGL display, and that display
 /// advertises `EGL_MESA_image_dma_buf_export`. Cached after first call.
+///
+/// GUI-thread only: mutates module globals (`probe`, `egl_lib`, the
+/// resolved fn pointers) without synchronization. The only caller is
+/// surface construction, which always runs on the GUI thread.
 pub fn available() bool {
     switch (probe) {
         .yes => return true,
@@ -107,11 +111,18 @@ fn ensureLib() bool {
             log.warn("failed to dlopen libEGL; OpenGL dmabuf path unavailable", .{});
             return false;
         };
+    // On any lookup failure, close the lib and reset BOTH function
+    // pointers — a resolved `get_proc_address` would otherwise dangle
+    // into the just-closed library while `egl_lib` stays null.
     get_proc_address = lib.lookup(GetProcAddressFn, "eglGetProcAddress") orelse {
+        get_proc_address = null;
+        query_string = null;
         lib.close();
         return false;
     };
     query_string = lib.lookup(QueryStringFn, "eglQueryString") orelse {
+        get_proc_address = null;
+        query_string = null;
         lib.close();
         return false;
     };

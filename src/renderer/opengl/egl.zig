@@ -22,6 +22,14 @@ pub const NONE: Int = 0x3038;
 pub const GL_TEXTURE_2D_KHR: Enum = 0x30B1;
 
 /// `eglGetProcAddress`-style loader: `(userdata, name) -> ?fn`.
+///
+/// Caveat: `eglGetProcAddress` is only *guaranteed* to resolve EGL
+/// extension entry points. `eglGetCurrentContext` (resolved in
+/// `Dispatch.init`) is a core function; EGL 1.5 /
+/// `EGL_KHR_get_all_proc_addresses` make resolving it via the loader
+/// reliable, and Mesa (our validated stack) does. If a stricter loader
+/// returns null for it, `Dispatch.init` returns null and the dmabuf path
+/// is cleanly disabled — no crash.
 pub const Loader = *const fn (?*anyopaque, [*:0]const u8) callconv(.c) ?*anyopaque;
 
 const GetCurrentContextFn = *const fn () callconv(.c) Context;

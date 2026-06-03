@@ -87,8 +87,8 @@ pub const DmabufPaintable = extern struct {
 
     /// The Paintable interface is installed in the class init via
     /// `gobject.ext.implement(gdk.Paintable, ...)`. The vtable
-    /// (`paintableIfaceInit` below) populates `f_snapshot` and the
-    /// `f_get_intrinsic_*` size hints. All other vfuncs use the
+    /// (`paintableIfaceInit` below) populates `f_snapshot`, `f_get_flags`,
+    /// and the `f_get_intrinsic_*` size hints. All other vfuncs use the
     /// PaintableInterface defaults.
     pub const Implements = [_]type{gdk.Paintable};
 
@@ -135,11 +135,13 @@ pub const DmabufPaintable = extern struct {
         pending_mutex: std.Thread.Mutex = .{},
 
         /// The widget whose `GdkFrameClock` paces our drain — the
-        /// `present_picture` we're attached to. Set once at surface
-        /// init (`setDriverWidget`), read on the GUI thread. We don't
-        /// hold a ref: the surface owns both us and the picture and
-        /// outlives any tick callback (GTK removes tick callbacks when
-        /// the widget is disposed).
+        /// `present_picture` we're attached to. Set at surface init
+        /// (`setDriverWidget`), cleared at teardown (`stop`); read on the
+        /// GUI thread only. We don't hold a ref — but the paintable can
+        /// outlive the widget (a pending `armTickIdle` holds a ref on us,
+        /// not the widget), so `stop()` MUST null this before the widget
+        /// is freed or a late `armTickIdle`/`tickCallback` would use a
+        /// dangling pointer.
         picture: ?*gtk.Widget = null,
 
         /// Active frame-clock tick-callback id (0 = none). GUI-thread
@@ -166,6 +168,12 @@ pub const DmabufPaintable = extern struct {
         /// draw before the renderer thread has produced a frame.
         has_presented: bool = false,
 
+        /// Set by `stop()` at surface teardown. Prevents `park` /
+        /// `armTickIdle` from (re)arming a tick on the now-cleared
+        /// `picture`. Guarded by `pending_mutex` (read on the renderer
+        /// thread in `park`).
+        stopped: bool = false,
+
         var offset: c_int = 0;
     };
 
@@ -184,6 +192,30 @@ pub const DmabufPaintable = extern struct {
     /// `present_picture`). Called once at surface init, GUI thread.
     pub fn setDriverWidget(self: *DmabufPaintable, widget: *gtk.Widget) void {
         privateOf(self).picture = widget;
+    }
+
+    /// Detach from the driver widget at surface teardown — GUI thread,
+    /// while `present_picture` is still alive (call before it's freed).
+    /// Removes any active tick callback and clears `picture` + sets
+    /// `stopped`, so a late `armTickIdle`/`park` (e.g. from an in-flight
+    /// renderer frame) can't arm a tick on the about-to-be-freed widget.
+    /// Idempotent.
+    pub fn stop(self: *DmabufPaintable) void {
+        const priv = privateOf(self);
+
+        // Remove the live tick callback (GUI-thread-only state). Its
+        // DestroyNotify drops the ref `armTickIdle` took for it.
+        if (priv.tick_id != 0) {
+            if (priv.picture) |p| p.removeTickCallback(priv.tick_id);
+            priv.tick_id = 0;
+        }
+
+        priv.pending_mutex.lock();
+        priv.stopped = true;
+        priv.tick_live = false;
+        priv.pending_mutex.unlock();
+
+        priv.picture = null;
     }
 
     /// Swap in a freshly-built texture. Drops the previous texture's
@@ -285,7 +317,7 @@ pub const DmabufPaintable = extern struct {
         // Start the frame-clock tick exactly once per animation
         // burst: if one is already live (active or arming), this
         // park just refreshes `pending` for the next tick.
-        const need_arm = !priv.tick_live;
+        const need_arm = !priv.tick_live and !priv.stopped;
         if (need_arm) priv.tick_live = true;
         priv.pending_mutex.unlock();
 
@@ -309,6 +341,15 @@ pub const DmabufPaintable = extern struct {
         defer self.as(gobject.Object).unref();
 
         const priv = privateOf(self);
+
+        // Torn down between the park and now: do nothing (the widget may
+        // already be freed). `stop()` cleared `tick_live`.
+        {
+            priv.pending_mutex.lock();
+            const stopped = priv.stopped;
+            priv.pending_mutex.unlock();
+            if (stopped) return;
+        }
 
         // No driver widget yet, or already ticking: nothing to do.
         // If we can't arm, clear `tick_live` so a later park retries.

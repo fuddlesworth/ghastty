@@ -2155,7 +2155,16 @@ pub const Surface = extern struct {
         // finalizes — which drops the texture, which drops the
         // dup'd dmabuf fd.
         if (vulkan_compiled) {
-            if (priv.dmabuf_paintable) |p| p.as(gobject.Object).unref();
+            if (priv.dmabuf_paintable) |p| {
+                // Detach from present_picture (still alive here, before
+                // disposeTemplate frees it) so no late tick/idle touches a
+                // freed widget, then drop our ref. Null the field — GObject
+                // dispose may run more than once and a second unref would
+                // over-release (the Picture still holds its own ref).
+                p.stop();
+                p.as(gobject.Object).unref();
+                priv.dmabuf_paintable = null;
+            }
 
             // Safety net: drop our OpenGL-dmabuf GdkGLContext if unrealize
             // didn't already (e.g. disposed while unrealized).

@@ -450,6 +450,13 @@ fn displayIsWayland(display: *gdk.Display) bool {
 /// is required for direct mode on NVIDIA (no COLOR_ATTACHMENT for the
 /// LINEAR modifier) and is also how we deliberately steer X11 — see
 /// the backend gate below.
+/// Threading: reached via `pickModifier` inside `Target.init`, which the
+/// renderer runs on its own thread (not the GUI thread). The GDK calls
+/// here are read-only on process-global / immutable data —
+/// `gdk_display_get_default()` returns the global display pointer (set
+/// once at startup) and `gdk_display_get_dmabuf_formats()` returns an
+/// immutable, ref-counted `GdkDmabufFormats` — so this is safe off the
+/// GUI thread (unlike GDK's mutating/event-loop APIs, which are not).
 fn cbGetSupportedModifiers(
     _: ?*anyopaque,
     drm_format: u32,

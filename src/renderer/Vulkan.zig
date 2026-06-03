@@ -386,16 +386,13 @@ fn bootstrapFromPlatform(
     };
 }
 
-/// Extract the Vulkan platform callbacks from a surface. Shape
-/// differs per apprt:
-///   - embedded: `rt_surface.platform` is a tagged union; the host
-///     picks at C-API call time, so non-`.vulkan` tags are a
-///     runtime error.
-///   - gtk: `rt_surface.platform` is a single struct (the GTK apprt
-///     only constructs Vulkan platforms when `-Drenderer=vulkan`),
-///     so the value is always present.
-/// Returns null only on the embedded mismatch case; GTK callers
-/// always get the platform.
+/// Extract the Vulkan platform callbacks from a surface.
+/// `rt_surface.platform` is a tagged union in both apprts (the backend
+/// is runtime-selected): the embedded host picks the tag at C-API call
+/// time, and the GTK apprt sets `.vulkan` only when Vulkan is the active
+/// backend. Returns null for any non-`.vulkan` tag — which shouldn't
+/// happen since the Vulkan renderer is only constructed when `.vulkan`
+/// is active.
 fn surfacePlatform(rt_surface: *apprt.Surface) ?apprt.platform.VulkanPlatform {
     return switch (apprt.runtime) {
         else => @compileError("unsupported app runtime for Vulkan"),
@@ -426,6 +423,16 @@ pub fn surfaceSize(self: *const Vulkan) !struct { width: u32, height: u32 } {
         // surface, not a field on the apprt wrapper. Mirrors how
         // `OpenGL.surfaceSize` reads from the GL viewport on GTK
         // rather than `rt_surface.size`.
+        //
+        // Threading: this runs on the renderer thread while the GUI
+        // thread writes the size (in the resize handler). The two
+        // u32 fields aren't read atomically together, so a read racing
+        // a resize can momentarily see a mismatched width/height — at
+        // worst one frame at a transient size, self-corrected on the
+        // next draw (and the resize path also drives a synchronous
+        // draw at the new size). A consistent snapshot would need the
+        // size made atomic/mutex-guarded across the whole apprt, which
+        // isn't warranted for a one-frame transient.
         apprt.gtk => try self.rt_surface.getSize(),
     };
     return .{ .width = size.width, .height = size.height };

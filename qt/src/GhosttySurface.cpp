@@ -1,5 +1,6 @@
 #include "GhosttySurface.h"
 
+#include "app/GhosttyApp.h"
 #include "config/Config.h"
 #include "input/XkbState.h"
 #include "InspectorWindow.h"
@@ -123,32 +124,42 @@ GhosttySurface::GhosttySurface(ghostty_app_t app, MainWindow *owner,
   static int s_useVulkan = -1;  // -1 undecided, 0 OpenGL, 1 Vulkan
   if (s_useVulkan < 0) {
     // Read the `renderer` config (an enum, marshaled by the C API as its
-    // tag-name string). Defaults to "auto" if unreadable.
+    // tag-name string). Read from the process-global app config rather
+    // than the owner window's, so this process-once decision doesn't
+    // depend on which surface happens to be constructed first. Defaults
+    // to "auto" if unreadable.
     QByteArray want = "auto";
-    if (m_owner) {
+    {
       const char *r = nullptr;
-      if (ghostty_config_get(m_owner->config(), &r, "renderer",
+      if (ghostty_config_get(GhosttyApp::instance().config(), &r, "renderer",
                              sizeof("renderer") - 1) &&
           r != nullptr) {
         want = r;
       }
     }
-    // Vulkan is "available" iff the host singleton brings up a Vulkan 1.3
-    // device with the required external-memory extensions.
-    const bool vk_avail = vulkan::Host::instance() != nullptr;
     bool use_vk;
     if (want == "opengl") {
+      // Explicit OpenGL: don't probe Vulkan at all — bringing up a
+      // Vulkan device (vkCreateInstance + device enumeration) would be
+      // wasted work and emit spurious failure logs on a system the user
+      // deliberately chose OpenGL for.
       use_vk = false;
-    } else if (want == "vulkan") {
-      use_vk = vk_avail;
-      if (!vk_avail)
-        std::fprintf(stderr,
-                     "[ghastty] renderer=vulkan but no usable Vulkan device; "
-                     "falling back to OpenGL\n");
     } else {
-      // auto (or anything else, e.g. metal on Linux): prefer Vulkan when
-      // available, else OpenGL.
+      // Vulkan is "available" iff the host singleton brings up a Vulkan
+      // 1.3 device with the required external-memory extensions.
+      const bool vk_avail = vulkan::Host::instance() != nullptr;
       use_vk = vk_avail;
+      if (want == "vulkan") {
+        if (!vk_avail)
+          std::fprintf(stderr,
+                       "[ghastty] renderer=vulkan but no usable Vulkan device; "
+                       "falling back to OpenGL\n");
+      } else if (want != "auto") {
+        std::fprintf(stderr,
+                     "[ghastty] unrecognized renderer=%s; using auto\n",
+                     want.constData());
+      }
+      // auto / unrecognized: prefer Vulkan when available, else OpenGL.
     }
     // Tell the core which backend to construct (overrides the `renderer`
     // config it applied at app init). Must happen before our first

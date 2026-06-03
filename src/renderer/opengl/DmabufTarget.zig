@@ -33,8 +33,10 @@ pub const Error = error{
     GLObjectFailed,
 };
 
-/// EGL function table + display, resolved once by the backend.
-dispatch: *const egl.Dispatch,
+/// EGL function table + display. Stored by value (a small POD of fn
+/// pointers) so this target doesn't alias into the backend's
+/// `egl_dispatch` optional payload.
+dispatch: egl.Dispatch,
 display: egl.Display,
 
 /// The EGLImage wrapping `texture` (owned; destroyed in deinit).
@@ -56,7 +58,7 @@ width: u32,
 height: u32,
 
 pub fn init(
-    dispatch: *const egl.Dispatch,
+    dispatch: egl.Dispatch,
     display: egl.Display,
     context: egl.Context,
     width: u32,
@@ -125,6 +127,12 @@ pub fn init(
     errdefer std.posix.close(fd);
     if (offset != 0) {
         log.warn("dmabuf export reported non-zero offset {d}; unsupported", .{offset});
+        return error.DmabufExportUnsupported;
+    }
+    if (stride <= 0) {
+        // A driver bug if it happens after a TRUE export, but `@intCast`
+        // below would panic on a negative value — reject defensively.
+        log.warn("dmabuf export reported non-positive stride {d}; unsupported", .{stride});
         return error.DmabufExportUnsupported;
     }
 
