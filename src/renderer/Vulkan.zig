@@ -407,7 +407,14 @@ fn surfacePlatform(rt_surface: *apprt.Surface) ?apprt.platform.VulkanPlatform {
             // non-Vulkan surface.
             .opengl, .macos, .ios => null,
         },
-        apprt.gtk => rt_surface.platform,
+        apprt.gtk => switch (rt_surface.platform) {
+            .vulkan => |p| p,
+            // The platform tag is chosen at runtime per the active
+            // backend; a non-Vulkan tag means Vulkan isn't the active
+            // renderer (shouldn't happen — the Vulkan renderer is only
+            // constructed when `.vulkan` is active).
+            .none, .opengl => null,
+        },
     };
 }
 

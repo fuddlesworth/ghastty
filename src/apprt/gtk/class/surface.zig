@@ -35,9 +35,39 @@ const vulkan_host = if (vulkan_compiled)
 else
     void;
 const DmabufPaintable = if (vulkan_compiled)
-    @import("../vulkan/DmabufPaintable.zig").DmabufPaintable
+    @import("../DmabufPaintable.zig").DmabufPaintable
 else
     void;
+
+/// EGL host for the OpenGL dmabuf-export present path (the OpenGL analog
+/// of `vulkan_host`). Reuses the Vulkan `DmabufPaintable`, so it's only
+/// available when Vulkan is compiled in (always true for GTK/Linux);
+/// `available()` then decides at runtime whether to use it or fall back
+/// to GtkGLArea compositing.
+const opengl_host = if (vulkan_compiled)
+    @import("../opengl/Host.zig")
+else
+    void;
+
+/// True when this process uses the OpenGL dmabuf-export present path
+/// (OpenGL backend + EGL export available). Reuses the Vulkan
+/// DmabufPaintable, so comptime-false without Vulkan compiled in.
+/// `opengl_host.available()` is cached, so this is stable per process.
+fn openglDmabufActive() bool {
+    return if (comptime vulkan_compiled)
+        (renderer.activeBackend() == .opengl and opengl_host.available())
+    else
+        false;
+}
+
+/// True when this surface presents through the `DmabufPaintable` +
+/// `present_picture` overlay (Vulkan or OpenGL-dmabuf) rather than a
+/// GtkGLArea framebuffer. Drives the render-widget type and present
+/// wiring in `init`.
+fn dmabufPresentActive() bool {
+    return (vulkan_compiled and renderer.activeBackend() == .vulkan) or
+        openglDmabufActive();
+}
 
 /// The render widget backing the surface drives sizing (its `resize`
 /// signal) and holds keyboard focus. When the active backend is OpenGL
@@ -671,6 +701,21 @@ pub const Surface = extern struct {
         else
             void = if (vulkan_compiled) null else {},
 
+        /// Our own `GdkGLContext` for the OpenGL dmabuf-export path
+        /// (that path has no GtkGLArea to manage one). Null on other
+        /// modes; created in `init`, dropped in `dispose`. Collapses to
+        /// `void` without Vulkan compiled (the path reuses the Vulkan
+        /// paintable).
+        gl_context: if (vulkan_compiled) ?*gdk.GLContext else void =
+            if (vulkan_compiled) null else {},
+
+        /// Per-surface state handed to the OpenGL platform callbacks
+        /// (`make_current` + `present`). Valid only while the OpenGL
+        /// dmabuf path is active (its address is stable — it lives in
+        /// the GObject private).
+        opengl_state: if (vulkan_compiled) opengl_host.Surface else void =
+            if (vulkan_compiled) undefined else {},
+
         /// The labels for the left/right sides of the URL hover tooltip.
         url_left: *gtk.Label,
         url_right: *gtk.Label,
@@ -876,8 +921,32 @@ pub const Surface = extern struct {
             // so GTK re-snapshots the current frame after an external
             // invalidation (e.g. reparenting).
             priv.present_picture.as(gtk.Widget).queueDraw();
+        } else if (openglDmabufActive()) {
+            // OpenGL-dmabuf: no GLArea render signal to queue. This is
+            // also the render trigger (the renderer thread posts
+            // `redraw_surface` here on the GUI thread, since OpenGL draws
+            // on the app thread), so drive the draw + present directly.
+            self.drawOpenglDmabuf();
         } else {
             gtkGLArea(priv.gl_area).queueRender();
+        }
+    }
+
+    /// Drive one OpenGL-dmabuf frame on the GUI thread: make our context
+    /// current, render (which exports a dmabuf and parks it on the
+    /// paintable via the OpenGL present callback), then install + repaint.
+    fn drawOpenglDmabuf(self: *Self) void {
+        if (comptime !vulkan_compiled) return;
+        const priv = self.private();
+        const surface = priv.core_surface orelse return;
+        const ctx = priv.gl_context orelse return;
+        ctx.makeCurrent();
+        surface.draw() catch |err| {
+            log.warn("error in opengl dmabuf draw err={}", .{err});
+            return;
+        };
+        if (priv.dmabuf_paintable) |p| {
+            if (p.drainPending()) priv.present_picture.as(gtk.Widget).queueDraw();
         }
     }
 
@@ -1857,24 +1926,30 @@ pub const Surface = extern struct {
         // — DmabufPaintable, vulkan_host — are dead and never analyzed);
         // otherwise a runtime check of the selected backend.
         const vulkan_active = vulkan_compiled and renderer.activeBackend() == .vulkan;
+        // OpenGL backend presenting via EGL dmabuf export (no GtkGLArea).
+        const opengl_dmabuf = openglDmabufActive();
+        // Either dmabuf path → DrawingArea + present_picture + paintable.
+        const dmabuf_present = vulkan_active or opengl_dmabuf;
 
         // Build the render widget in code (not the template) because its
-        // type depends on the active backend and a single build may have
-        // both: GtkGLArea on OpenGL (terminal draws into its GL context),
-        // GtkDrawingArea on Vulkan (renderer presents via present_picture
-        // + DmabufPaintable, so a GLArea's GdkGLContext would be wasted).
-        // Both provide the `resize` signal that drives surface init/sizing
-        // and accept keyboard focus; input controllers live on the parent
-        // Box (surface.blp). Installed as render_overlay's main child,
-        // below present_picture. It must stay visible/allocated — a hidden
-        // GTK widget gets no size allocation, so no `resize`, so the
-        // surface never initializes.
+        // type depends on the active backend + mode, and a single build
+        // may have all: GtkDrawingArea when presenting via a dmabuf
+        // (Vulkan, or OpenGL with EGL export — the renderer hands GTK a
+        // dmabuf shown by present_picture, so a GLArea's framebuffer is
+        // unused and only adds a GL→GSK import), GtkGLArea on the OpenGL
+        // fallback (terminal draws into its GL context). All provide the
+        // `resize` signal that drives surface init/sizing and accept
+        // keyboard focus; input controllers live on the parent Box
+        // (surface.blp). Installed as render_overlay's main child, below
+        // present_picture. It must stay visible/allocated — a hidden GTK
+        // widget gets no size allocation, so no `resize`, so the surface
+        // never initializes.
         // The per-type `resize`/`render` signals require the concrete
         // widget instance (GTK's typed `connect` can't downcast a base
         // *gtk.Widget), so connect them while we still have the concrete
         // type, then store/reuse the base *gtk.Widget for everything else.
         const render_widget: *gtk.Widget = rw: {
-            if (vulkan_active) {
+            if (dmabuf_present) {
                 const da = gtk.DrawingArea.new();
                 _ = gtk.DrawingArea.signals.resize.connect(da, *Self, &drawingAreaResize, self, .{});
                 break :rw da.as(gtk.Widget);
@@ -1903,40 +1978,66 @@ pub const Surface = extern struct {
 
         priv.render_overlay.setChild(render_widget);
 
-        // Vulkan-active widget wiring: stand up the per-surface
-        // DmabufPaintable and attach it to `present_picture` (overlaid on
-        // top of the render widget). Done before populating
+        // Dmabuf present wiring (Vulkan or OpenGL-dmabuf): stand up the
+        // per-surface DmabufPaintable and attach it to `present_picture`
+        // (overlaid on top of the render widget). Done before populating
         // `priv.rt_surface` so the platform callbacks' `userdata` points
-        // at the live paintable.
-        if (vulkan_active) {
-            const paintable = DmabufPaintable.new();
-            priv.dmabuf_paintable = paintable;
-            priv.present_picture.setPaintable(paintable.as(gdk.Paintable));
+        // at live state. `dmabuf_present` implies `vulkan_compiled` (the
+        // paintable type), so this whole block is comptime-dead without
+        // Vulkan compiled.
+        if (comptime vulkan_compiled) {
+            if (dmabuf_present) {
+                const paintable = DmabufPaintable.new();
+                priv.dmabuf_paintable = paintable;
+                priv.present_picture.setPaintable(paintable.as(gdk.Paintable));
 
-            // The shared error_page template is OpenGL-worded ("Unable to
-            // acquire an OpenGL context", + a GTK-OpenGL help link).
-            // Retarget it for Vulkan; it's only shown if surface init
-            // fails (see `initSurface`'s catch).
-            priv.error_page.setDescription(
-                "Unable to initialize Vulkan for rendering. Your GPU or " ++
-                    "driver may not support the required Vulkan 1.3 features " ++
-                    "(VK_KHR_external_memory_fd, VK_EXT_external_memory_dma_buf, " ++
-                    "VK_EXT_image_drm_format_modifier).",
-            );
-            priv.error_page.setChild(null);
+                // Pace the paintable's drain on `present_picture`'s frame
+                // clock (see DmabufPaintable): parked frames install on a
+                // tick callback in lockstep with the compositor, so
+                // continuous custom-shader animation stays smooth instead
+                // of stalling when a plain idle lets the frame clock sleep.
+                paintable.setDriverWidget(priv.present_picture.as(gtk.Widget));
+
+                if (vulkan_active) {
+                    // The shared error_page template is OpenGL-worded;
+                    // retarget it for Vulkan (shown only if init fails).
+                    priv.error_page.setDescription(
+                        "Unable to initialize Vulkan for rendering. Your GPU or " ++
+                            "driver may not support the required Vulkan 1.3 features " ++
+                            "(VK_KHR_external_memory_fd, VK_EXT_external_memory_dma_buf, " ++
+                            "VK_EXT_image_drm_format_modifier).",
+                    );
+                    priv.error_page.setChild(null);
+                } else {
+                    // OpenGL-dmabuf: the platform callbacks need the
+                    // paintable now; the GL context is created at realize
+                    // and filled into the same state struct then.
+                    priv.opengl_state = .{ .gl_context = null, .paintable = paintable };
+                }
+            }
         }
 
         // Initialize some private fields so they aren't undefined
-        priv.rt_surface = if (vulkan_active) .{
-            .surface = self,
-            // `userdata` is the per-surface DmabufPaintable.
-            // libghostty passes it back to `cbPresent`, which
-            // calls `setTexture` on it directly — no detour
-            // through the GObject Surface.
-            .platform = vulkan_host.asPlatform(@ptrCast(priv.dmabuf_paintable.?)),
-        } else .{
-            .surface = self,
-        };
+        priv.rt_surface = .{ .surface = self };
+        if (comptime vulkan_compiled) {
+            if (vulkan_active) {
+                // `userdata` is the per-surface DmabufPaintable;
+                // libghostty hands it back to `cbPresent`, which parks on
+                // it directly — no detour through the GObject Surface.
+                priv.rt_surface.platform = .{
+                    .vulkan = vulkan_host.asPlatform(@ptrCast(priv.dmabuf_paintable.?)),
+                };
+            } else if (opengl_dmabuf) {
+                // userdata is the per-surface OpenGL state (GL context +
+                // paintable); its address is stable in the GObject
+                // private. make_current uses the context (set at realize);
+                // present parks on the paintable.
+                priv.rt_surface.platform = .{
+                    .opengl = opengl_host.asPlatform(&priv.opengl_state),
+                };
+            }
+            // else `.none` (default): OpenGL backend stays on GtkGLArea.
+        }
         priv.precision_scroll = false;
         priv.cursor_pos = .{ .x = 0, .y = 0 };
         priv.mouse_shape = .text;
@@ -2055,6 +2156,13 @@ pub const Surface = extern struct {
         // dup'd dmabuf fd.
         if (vulkan_compiled) {
             if (priv.dmabuf_paintable) |p| p.as(gobject.Object).unref();
+
+            // Safety net: drop our OpenGL-dmabuf GdkGLContext if unrealize
+            // didn't already (e.g. disposed while unrealized).
+            if (priv.gl_context) |ctx| {
+                ctx.as(gobject.Object).unref();
+                priv.gl_context = null;
+            }
         }
 
         // This works around a GTK double-free bug where if you bind
@@ -3388,13 +3496,31 @@ pub const Surface = extern struct {
 
         const priv = self.private();
 
-        // OpenGL-only: bring the GL context current and notify the
-        // renderer. On Vulkan the render widget is a plain DrawingArea
-        // with no GL context (the renderer owns its own VkDevice, see
-        // `apprt/gtk/vulkan/Host.zig`), so we skip this block. We still
-        // set up the input method below, since the render widget is the
-        // focus widget regardless of the backend.
-        if (renderer.activeBackend() != .vulkan) {
+        // Bring the GL context current and notify the renderer. Three
+        // modes:
+        //   - Vulkan: DrawingArea, no GL context (the renderer owns its
+        //     own VkDevice); skip entirely.
+        //   - OpenGL-dmabuf: DrawingArea + our own GdkGLContext (created
+        //     here so it has a realized GdkSurface).
+        //   - OpenGL fallback: GtkGLArea manages the context.
+        // The input method below is set up regardless (the render widget
+        // is the focus widget for every mode).
+        if (openglDmabufActive()) {
+            if (comptime vulkan_compiled) {
+                self.realizeOpenglContext() catch {
+                    self.setError(true);
+                    return;
+                };
+                if (priv.core_surface) |v| realize: {
+                    priv.gl_context.?.makeCurrent();
+                    v.renderer.displayRealized() catch |err| {
+                        log.warn("core displayRealized failed err={}", .{err});
+                        break :realize;
+                    };
+                    self.redraw();
+                }
+            }
+        } else if (renderer.activeBackend() != .vulkan) {
             const gl_area = gtkGLArea(priv.gl_area);
             // Make the GL area current so we can detect any OpenGL errors. If
             // we have errors here we can't render and we switch to the error
@@ -3427,6 +3553,35 @@ pub const Surface = extern struct {
         priv.im_context.as(gtk.IMContext).setClientWidget(self.as(gtk.Widget));
     }
 
+    /// Create + realize our own `GdkGLContext` for the OpenGL-dmabuf
+    /// path (no GtkGLArea to manage one) and record it on the per-surface
+    /// state the platform callbacks read. Idempotent.
+    fn realizeOpenglContext(self: *Self) !void {
+        if (comptime !vulkan_compiled) return;
+        const priv = self.private();
+        if (priv.gl_context != null) return;
+
+        const display = gdk.Display.getDefault() orelse return error.GLAreaError;
+        var gerr: ?*glib.Error = null;
+        const ctx = display.createGlContext(&gerr) orelse {
+            if (gerr) |e| {
+                log.warn("createGlContext failed: {s}", .{e.f_message orelse "(no message)"});
+                e.free();
+            }
+            return error.GLAreaError;
+        };
+        errdefer ctx.as(gobject.Object).unref();
+        if (ctx.realize(&gerr) == 0) {
+            if (gerr) |e| {
+                log.warn("GdkGLContext realize failed: {s}", .{e.f_message orelse "(no message)"});
+                e.free();
+            }
+            return error.GLAreaError;
+        }
+        priv.gl_context = ctx;
+        priv.opengl_state.gl_context = ctx;
+    }
+
     fn glareaUnrealize(
         widget: *gtk.Widget,
         self: *Self,
@@ -3435,8 +3590,22 @@ pub const Surface = extern struct {
 
         const priv = self.private();
 
-        // See `glareaRealize` for why this is OpenGL-only.
-        if (renderer.activeBackend() != .vulkan) {
+        // See `glareaRealize`. Three modes (Vulkan skips entirely).
+        if (openglDmabufActive()) {
+            if (comptime vulkan_compiled) {
+                if (priv.gl_context) |ctx| {
+                    if (priv.core_surface) |surface| {
+                        ctx.makeCurrent();
+                        surface.renderer.displayUnrealized();
+                    }
+                    // Drop our context (GL objects in the OpenGL backend's
+                    // dmabuf target are freed via the renderer's deinit /
+                    // context teardown).
+                    ctx.as(gobject.Object).unref();
+                    priv.gl_context = null;
+                }
+            }
+        } else if (renderer.activeBackend() != .vulkan) {
             // Notify our core surface
             if (priv.core_surface) |surface| {
                 const gl_area = gtkGLArea(widget);
@@ -3565,11 +3734,12 @@ pub const Surface = extern struct {
 
         // GtkGLArea's `resize` reports device pixels (already multiplied
         // by the scale factor), but GtkDrawingArea's reports logical
-        // pixels. The core surface and the Vulkan dmabuf must be sized in
-        // device pixels, so scale up on the DrawingArea (Vulkan) path;
-        // `present_picture`'s content-fit:fill then maps the device-sized
-        // texture 1:1. OpenGL is already device-sized, so leave it alone.
-        const size_scale: c_int = if (renderer.activeBackend() == .vulkan)
+        // pixels. The core surface and the dmabuf must be sized in device
+        // pixels, so scale up on the DrawingArea paths (Vulkan and
+        // OpenGL-dmabuf); `present_picture`'s content-fit:fill then maps
+        // the device-sized texture 1:1. The GtkGLArea fallback is already
+        // device-sized, so leave it alone.
+        const size_scale: c_int = if (dmabufPresentActive())
             gl_area.getScaleFactor()
         else
             1;
@@ -3592,6 +3762,45 @@ pub const Surface = extern struct {
                 surface.sizeCallback(new_size) catch |err| {
                     log.warn("error in size callback err={}", .{err});
                 };
+
+                // Dmabuf paths (Vulkan, OpenGL-dmabuf): drive a
+                // synchronous draw at the new size and install the frame
+                // before size-allocate returns, so `present_picture`
+                // paints the new-size dmabuf instead of `content-fit:fill`
+                // stretching the previous one. `Surface.draw` renders +
+                // presents inline on this (GUI) thread (serialized with
+                // the renderer thread by the renderer's `draw_mutex`);
+                // the present callback parks the frame and we drain it
+                // here — off the inline present, so the install doesn't
+                // re-enter GTK layout mid size-allocate (a naive inline
+                // install crashed). Gated on a prior frame so we never
+                // draw before a first frame exists. The GtkGLArea
+                // fallback keeps GTK's own GL resize handling.
+                if (comptime vulkan_compiled) {
+                    if (dmabufPresentActive()) {
+                        if (priv.dmabuf_paintable) |paintable| {
+                            if (paintable.hasPresented()) {
+                                // OpenGL-dmabuf renders on this (GUI)
+                                // thread, so its context must be current.
+                                // Vulkan renders on the renderer thread.
+                                if (openglDmabufActive()) {
+                                    if (priv.gl_context) |ctx| ctx.makeCurrent();
+                                }
+                                surface.draw() catch |err| {
+                                    log.warn("error in resize draw err={}", .{err});
+                                };
+                                // Install the just-rendered new-size frame
+                                // and repaint now, before size-allocate
+                                // returns. `drainPending` doesn't self-
+                                // invalidate (the frame-clock tick path
+                                // does), so request the paint explicitly.
+                                if (paintable.drainPending())
+                                    priv.present_picture.as(gtk.Widget).queueDraw();
+                            }
+                        }
+                    }
+                }
+
                 // Setup our resize overlay if configured
                 self.resizeOverlaySchedule();
             }
@@ -3622,10 +3831,17 @@ pub const Surface = extern struct {
         const priv: *Private = self.private();
         assert(priv.core_surface == null);
 
-        // OpenGL needs a current GL context before any surface operation.
-        // The Vulkan renderer owns its own VkDevice and the render widget
-        // is a plain DrawingArea with no GL context, so this is skipped.
-        if (renderer.activeBackend() != .vulkan) {
+        // OpenGL needs a current GL context before any surface operation
+        // (the backend's `surfaceInit` loads GL against it). The Vulkan
+        // renderer owns its own VkDevice with no GL context, so it's
+        // skipped. OpenGL-dmabuf uses our own GdkGLContext (created at
+        // realize); the GtkGLArea fallback uses the area's context.
+        if (openglDmabufActive()) {
+            if (comptime vulkan_compiled) {
+                const ctx = priv.gl_context orelse return error.GLAreaError;
+                ctx.makeCurrent();
+            }
+        } else if (renderer.activeBackend() != .vulkan) {
             const gl_area = gtkGLArea(priv.gl_area);
             gl_area.makeCurrent();
             if (gl_area.getError()) |err| {

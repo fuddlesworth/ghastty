@@ -67,3 +67,53 @@ pub const VulkanPlatform = struct {
         bool, // image_backed
     ) callconv(.c) void,
 };
+
+/// Configuration for a host that owns an OpenGL/EGL context libghostty
+/// should render against, and that can display a rendered frame handed
+/// back as a dmabuf file descriptor (zero-copy, mirroring the Vulkan
+/// path). This is the dmabuf-export OpenGL path: libghostty renders the
+/// final frame into a GL texture exported as a dmabuf via
+/// `EGL_MESA_image_dma_buf_export`, then hands the fd to `present`.
+///
+/// Hosts that can't satisfy the dmabuf path (no EGL display, or
+/// `EGL_MESA_image_dma_buf_export` missing — e.g. some drivers) should
+/// not construct this; the apprt falls back to its own compositing
+/// (e.g. GTK's GtkGLArea).
+///
+/// Handles are `?*anyopaque` so callers don't need EGL headers; treat
+/// `egl_display` as an `EGLDisplay`.
+pub const OpenGLPlatform = struct {
+    userdata: ?*anyopaque,
+
+    /// Resolve an EGL/GL entry point by name (an `eglGetProcAddress`
+    /// shim). libghostty resolves the `EGL_MESA_image_dma_buf_export`
+    /// functions through this.
+    get_proc_address: *const fn (
+        ?*anyopaque,
+        [*:0]const u8,
+    ) callconv(.c) ?*anyopaque,
+
+    /// The host's `EGLDisplay`. libghostty creates/exports `EGLImage`s
+    /// against it. Returns null if EGL isn't available.
+    egl_display: *const fn (?*anyopaque) callconv(.c) ?*anyopaque,
+
+    /// Make the host's GL context current on the calling thread. All
+    /// GL work (including the dmabuf export) happens between this and
+    /// the next frame. Called on the thread that drives draws (the GUI
+    /// thread for GTK — OpenGL must draw there).
+    make_current: *const fn (?*anyopaque) callconv(.c) void,
+
+    /// Hand off a rendered frame to the host as a dmabuf fd, exported
+    /// from a GL texture (always image-backed / importable). The fd is
+    /// valid only for the duration of the call — the host must `dup()`
+    /// to hold it longer; libghostty retains the backing texture.
+    present: *const fn (
+        ?*anyopaque,
+        i32, // dmabuf fd
+        u32, // DRM_FORMAT_*
+        u64, // DRM modifier
+        u32, // width (pixels)
+        u32, // height (pixels)
+        u32, // stride (bytes)
+    ) callconv(.c) void,
+};

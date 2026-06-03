@@ -14,6 +14,8 @@ const Renderer = rendererpkg.GenericRenderer(OpenGL);
 
 pub const GraphicsAPI = OpenGL;
 pub const Target = @import("opengl/Target.zig");
+pub const DmabufTarget = @import("opengl/DmabufTarget.zig");
+const egl = @import("opengl/egl.zig");
 pub const Frame = @import("opengl/Frame.zig");
 pub const RenderPass = @import("opengl/RenderPass.zig");
 pub const Pipeline = @import("opengl/Pipeline.zig");
@@ -55,6 +57,20 @@ last_target: ?Target = null,
 /// keeps in sync).
 rt_surface: *apprt.Surface,
 
+/// GTK dmabuf-export present path (zero-copy → `GdkDmabufTexture`),
+/// mirroring the Vulkan backend. Active when the host hands us an
+/// `OpenGLPlatform` (via `rt_surface.platform`) and EGL exposes
+/// `EGL_MESA_image_dma_buf_export`. When inactive we fall back to
+/// blitting the GtkGLArea default framebuffer (the path below).
+///
+/// Resolved lazily on the first `present` (GUI thread, GL context
+/// current). `egl_probed` guards a one-time resolution so a missing
+/// extension disables the path instead of retrying every frame.
+egl_dispatch: ?egl.Dispatch = null,
+egl_probed: bool = false,
+/// The dmabuf the renderer blits each frame into; recreated on resize.
+dmabuf_target: ?DmabufTarget = null,
+
 /// NOTE: This is an error{}!OpenGL instead of just OpenGL for parity with
 ///       Metal, since it needs to be fallible so does this, even though it
 ///       can't actually fail.
@@ -67,6 +83,11 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) error{}!OpenGL {
 }
 
 pub fn deinit(self: *OpenGL) void {
+    // Best-effort: deleting the GL texture/FBO needs the context
+    // current; at teardown it usually is (GTK destroys the surface on
+    // the GUI thread). Any objects not freed here are reclaimed when
+    // the GL context itself is destroyed.
+    if (self.dmabuf_target) |*t| t.deinit();
     self.* = undefined;
 }
 
@@ -337,8 +358,18 @@ pub fn surfaceSize(self: *const OpenGL) !struct { width: u32, height: u32 } {
         else => @compileError("unsupported app runtime for OpenGL"),
 
         // GTK keeps the GL viewport in sync with the GLArea size, so it
-        // is a reliable source of the drawable size.
+        // is a reliable source of the drawable size — for the GtkGLArea
+        // path. The OpenGL-dmabuf path renders into our own FBO with no
+        // GtkGLArea, so there's no synced viewport; use the apprt's
+        // tracked size instead (set from the DrawingArea resize).
         apprt.gtk => {
+            switch (self.rt_surface.platform) {
+                .opengl => {
+                    const s = try self.rt_surface.getSize();
+                    return .{ .width = s.width, .height = s.height };
+                },
+                else => {},
+            }
             var viewport: [4]gl.c.GLint = undefined;
             gl.glad.context.GetIntegerv.?(gl.c.GL_VIEWPORT, &viewport);
             return .{
@@ -368,6 +399,27 @@ pub fn initTarget(self: *const OpenGL, width: usize, height: usize) !Target {
 
 /// Present the provided target.
 pub fn present(self: *OpenGL, target: Target) !void {
+    // Remember this target so no-op frames can re-present it.
+    self.last_target = target;
+
+    // GTK dmabuf-export path: render the frame out as a dmabuf and hand
+    // it to the host for zero-copy display (GdkDmabufTexture), bypassing
+    // GtkGLArea's GL→GSK compositor import. Falls through to the default
+    // blit when the host doesn't offer the path or export fails.
+    if (comptime apprt.runtime == apprt.gtk) {
+        if (self.dmabufPlatform()) |platform| {
+            self.presentDmabuf(platform, target) catch |err| {
+                log.warn(
+                    "dmabuf present failed, disabling (no fallback path on this surface): {}",
+                    .{err},
+                );
+                self.disableDmabuf();
+                return;
+            };
+            return;
+        }
+    }
+
     // In order to present a target we blit it to the default framebuffer.
 
     // We disable GL_FRAMEBUFFER_SRGB while doing this blit, otherwise the
@@ -397,9 +449,6 @@ pub fn present(self: *OpenGL, target: Target) !void {
         gl.c.GL_NEAREST,
     );
 
-    // Keep track of this target in case we need to repeat it.
-    self.last_target = target;
-
     // Embedded OpenGL hosts own buffer presentation: the blit above only
     // writes the default framebuffer, so ask the host to swap buffers.
     // (GTK presents implicitly via its GLArea, so this is embedded-only.)
@@ -422,6 +471,108 @@ pub fn present(self: *OpenGL, target: Target) !void {
 /// Present the last presented target again.
 pub fn presentLastTarget(self: *OpenGL) !void {
     if (self.last_target) |target| try self.present(target);
+}
+
+/// The host's OpenGL dmabuf platform, if the dmabuf path is available
+/// and hasn't been disabled. GTK-only.
+fn dmabufPlatform(self: *OpenGL) ?apprt.platform.OpenGLPlatform {
+    // Disabled after a probe/export failure.
+    if (self.egl_probed and self.egl_dispatch == null) return null;
+    return switch (self.rt_surface.platform) {
+        .opengl => |p| p,
+        else => null,
+    };
+}
+
+/// Disable the dmabuf path (export unsupported or failed) and release
+/// any partial state. Subsequent `dmabufPlatform` calls return null.
+fn disableDmabuf(self: *OpenGL) void {
+    if (self.dmabuf_target) |*t| t.deinit();
+    self.dmabuf_target = null;
+    self.egl_dispatch = null;
+    self.egl_probed = true;
+}
+
+/// Blit the rendered frame into a dmabuf-backed texture and hand the fd
+/// to the host. GUI thread, GL context current (the apprt makes it
+/// current around the draw).
+fn presentDmabuf(
+    self: *OpenGL,
+    platform: apprt.platform.OpenGLPlatform,
+    target: Target,
+) !void {
+    // Resolve the EGL export entry points once.
+    if (!self.egl_probed) {
+        self.egl_probed = true;
+        self.egl_dispatch = egl.Dispatch.init(
+            platform.get_proc_address,
+            platform.userdata,
+        );
+    }
+    const dispatch = if (self.egl_dispatch) |*d| d else return error.DmabufExportUnsupported;
+    const display = platform.egl_display(platform.userdata) orelse
+        return error.DmabufExportUnsupported;
+
+    const w: u32 = @intCast(target.width);
+    const h: u32 = @intCast(target.height);
+
+    // (Re)create the dmabuf target on first use / size change.
+    const stale = if (self.dmabuf_target) |dt|
+        (dt.width != w or dt.height != h)
+    else
+        true;
+    if (stale) {
+        if (self.dmabuf_target) |*dt| dt.deinit();
+        self.dmabuf_target = null;
+        self.dmabuf_target = try DmabufTarget.init(
+            dispatch,
+            display,
+            dispatch.getCurrentContext(),
+            w,
+            h,
+        );
+    }
+    const dt = &self.dmabuf_target.?;
+
+    // Blit the rendered frame (internal target FBO) into the dmabuf FBO,
+    // flipping Y: GL renders bottom-left origin, but the dmabuf is
+    // sampled top-down by the host's GdkDmabufTexture. See the SRGB note
+    // on the default-blit path above for why we disable it here too.
+    try gl.disable(gl.c.GL_FRAMEBUFFER_SRGB);
+    defer gl.enable(gl.c.GL_FRAMEBUFFER_SRGB) catch |err| {
+        log.err("Error re-enabling GL_FRAMEBUFFER_SRGB, err={}", .{err});
+    };
+
+    const read_bind = try target.framebuffer.bind(.read);
+    defer read_bind.unbind();
+    gl.glad.context.BindFramebuffer.?(gl.c.GL_DRAW_FRAMEBUFFER, dt.framebuffer);
+    gl.glad.context.BlitFramebuffer.?(
+        0,
+        0,
+        @intCast(target.width),
+        @intCast(target.height),
+        0,
+        @intCast(h), // dst Y inverted (top<->bottom): vertical flip
+        @intCast(w),
+        0,
+        gl.c.GL_COLOR_BUFFER_BIT,
+        gl.c.GL_NEAREST,
+    );
+    gl.glad.context.BindFramebuffer.?(gl.c.GL_DRAW_FRAMEBUFFER, 0);
+
+    // Submit the blit so the importing compositor sees a complete frame.
+    // dma-buf implicit fencing (Mesa) handles read-after-write ordering.
+    gl.glad.context.Flush.?();
+
+    platform.present(
+        platform.userdata,
+        dt.fd,
+        dt.drm_format,
+        dt.drm_modifier,
+        w,
+        h,
+        dt.stride,
+    );
 }
 
 /// Returns the options to use when constructing buffers.

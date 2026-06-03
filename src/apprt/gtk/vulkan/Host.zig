@@ -38,7 +38,7 @@ const build_options = @import("build_options");
 const gdk_wayland = if (build_options.wayland) @import("gdk_wayland") else struct {};
 const vulkan = @import("vulkan");
 const vk = vulkan.c;
-const DmabufPaintable = @import("DmabufPaintable.zig").DmabufPaintable;
+const DmabufPaintable = @import("../DmabufPaintable.zig").DmabufPaintable;
 
 const log = std.log.scoped(.gtk_vulkan_host);
 
@@ -490,29 +490,28 @@ fn cbGetSupportedModifiers(
     return if (out != null) @min(matched, capacity) else matched;
 }
 
-/// Build a `GdkDmabufTexture` from the dmabuf fd libghostty hands
-/// us and install it on the per-surface `DmabufPaintable`
-/// (`userdata`). The paintable swaps the texture atomically and
-/// invalidates its contents, queueing a redraw on the GUI thread.
+/// Hand the frame libghostty rendered to the per-surface
+/// `DmabufPaintable` (`userdata`) by *parking* it for a GUI-thread
+/// drain. We do not build any `GdkTexture` here — see the threading
+/// note in DmabufPaintable for why all GDK work is kept on the GUI
+/// thread and out of the inline present.
 ///
 /// libghostty's `present` contract:
-///   - The fd is *borrowed*; we must `dup()` if we hold it past
-///     the call. The renderer keeps the underlying VkDeviceMemory
-///     alive — when our dup'd fd is closed (via the destroy
-///     notify on the texture), the memory is freed.
+///   - The fd is *borrowed*; we `dup()` it (direct path) or copy its
+///     pixels (legacy path) before returning. The renderer keeps the
+///     underlying VkDeviceMemory alive — when our dup'd fd is closed
+///     (via the texture's destroy notify) the memory is freed.
 ///   - `image_backed` is true when the dmabuf was exported from a
-///     VkImage (importable as a 2D image), which is the path this
-///     function handles. When false it came from a VkBuffer fallback
-///     (NVIDIA, no COLOR_ATTACHMENT for the LINEAR modifier) that
-///     can't be imported as a GdkDmabufTexture; `cbPresent` routes
-///     those to `presentLegacyCopy` (mmap + GdkMemoryTexture) before
-///     ever reaching here.
+///     VkImage (importable as a 2D image), the direct-import path.
+///     When false it came from a VkBuffer fallback (NVIDIA, no
+///     COLOR_ATTACHMENT for the LINEAR modifier) that can't be
+///     imported as a GdkDmabufTexture; those route to
+///     `presentLegacyCopy` (mmap + GdkMemoryTexture copy).
 ///
-/// Threading: called from libghostty's renderer thread.
-/// `GdkDmabufTextureBuilder.build` has no documented thread
-/// restriction (it's metadata + an fd hold). The actual GPU
-/// import is deferred to the GtkPicture's snapshot path on the
-/// GUI thread.
+/// Threading: called from libghostty's renderer thread in steady
+/// state, and from the GUI thread during a resize (the synchronous
+/// `Surface.draw` renders inline on the caller). Both only ever
+/// `park` here; the build happens later, on the GUI thread.
 fn cbPresent(
     userdata: ?*anyopaque,
     dmabuf_fd: i32,
@@ -550,72 +549,32 @@ fn cbPresent(
         return;
     }
 
-    // dup() the fd so its lifetime is bound to our texture, not
-    // libghostty's call stack. The destroy notify below will
-    // close it when GDK drops the last reference.
-    const owned_fd = std.posix.dup(dmabuf_fd) catch |err| {
-        log.warn("present: dup(dmabuf_fd) failed: {s}", .{@errorName(err)});
-        return;
-    };
-
-    const display = gdk.Display.getDefault() orelse {
-        log.warn("present: no default display", .{});
-        std.posix.close(owned_fd);
-        return;
-    };
-
-    const builder = gdk.DmabufTextureBuilder.new();
-    defer builder.unref();
-    builder.setDisplay(display);
-    builder.setWidth(width);
-    builder.setHeight(height);
-    builder.setFourcc(drm_format);
-    builder.setModifier(drm_modifier);
-    builder.setNPlanes(1);
-    builder.setFd(0, owned_fd);
-    builder.setStride(0, stride);
-    builder.setOffset(0, 0);
-    // Renderer outputs premultiplied alpha — see the `VK_FORMAT_B8G8R8A8_SRGB`
-    // comment in `vulkan/Target.zig::initTarget`.
-    builder.setPremultiplied(@intFromBool(true));
-
-    var gerr: ?*@import("glib").Error = null;
-    const tex = builder.build(&fdDestroyNotify, @ptrFromInt(@as(usize, @intCast(owned_fd))), &gerr);
-    if (tex == null) {
-        const msg = if (gerr) |e| (if (e.f_message) |m| std.mem.sliceTo(m, 0) else "(no message)") else "(no error)";
-        log.warn("present: GdkDmabufTexture build failed: {s}", .{msg});
-        if (gerr) |e| e.free();
-        // The destroy notify did NOT fire on build failure — close
-        // the dup'd fd ourselves to avoid a leak.
-        std.posix.close(owned_fd);
-        return;
-    }
-
-    // Hand the texture to the surface's paintable. `setTexture`
-    // takes a strong ref internally; we drop our build-time ref
-    // afterward. The previous texture (if any) is unref'd by the
-    // setter, which cascades to its destroy notify and frees the
-    // previous frame's `VkDeviceMemory`.
-    paintable.setTexture(tex);
-    tex.?.as(gobject.Object).unref();
+    // Park the frame for a GUI-thread drain (the drain may build the
+    // `GdkDmabufTexture` after this call returns). The fd is borrowed;
+    // `parkBorrowedDirect` dups it so it outlives the call — the
+    // texture's destroy notify closes the dup, and the paintable closes
+    // it if the frame is superseded or dropped before draining. We never
+    // build GDK objects here — see the threading note in DmabufPaintable.
+    _ = paintable.parkBorrowedDirect(dmabuf_fd, drm_format, drm_modifier, width, height, stride);
 }
 
 /// `.legacy_copy` present path: the renderer exported a LINEAR
 /// VkBuffer rather than an importable VkImage, so the dmabuf fd
-/// can't be wrapped as a `GdkDmabufTexture`. We mmap it read-only,
-/// copy the pixels into a `GdkMemoryTexture` (a one-shot CPU copy
-/// GTK uploads on the GUI thread), and install it on the paintable.
-/// Mirrors the Qt frontend's mmap + QImage fallback
-/// (`qt/src/GhosttySurface.cpp`), including its size/format guards.
+/// can't be wrapped as a `GdkDmabufTexture`. We mmap it read-only
+/// and copy the pixels into a `GBytes`, then park that copy for the
+/// GUI-thread drain to wrap in a `GdkMemoryTexture`. Mirrors the Qt
+/// frontend's mmap + QImage fallback (`qt/src/GhosttySurface.cpp`),
+/// including its size/format guards.
 ///
 /// fd ownership: borrowed, per the platform contract. The copy path
 /// neither dups nor closes it — libghostty frees the backing memory
-/// (and the fd) when its `Target` is freed.
+/// (and the fd) when its `Target` is freed. We must copy before
+/// returning because the renderer reuses the host-visible buffer.
 ///
-/// Threading: runs on libghostty's renderer thread. The mmap, the
-/// copy into the GBytes, and texture construction are plain
-/// memory/object ops; the GPU upload is deferred to the paintable's
-/// snapshot on the GUI thread, and `setTexture` is thread-safe.
+/// Threading: runs on libghostty's renderer thread (or the GUI
+/// thread on resize). The mmap + GBytes copy are plain memory ops;
+/// the `GdkMemoryTexture` is built later by the drain on the GUI
+/// thread.
 fn presentLegacyCopy(
     paintable: *DmabufPaintable,
     dmabuf_fd: i32,
@@ -674,30 +633,12 @@ fn presentLegacyCopy(
     };
     defer std.posix.munmap(mapped);
 
-    // `glib.Bytes.new` copies the data, so the GBytes — and the
-    // texture built from it — outlive the munmap above.
+    // `glib.Bytes.new` copies the data, so the GBytes outlives the
+    // munmap above. Ownership of this strong ref transfers to the
+    // paintable, which drops it once the frame is drained, superseded
+    // or dropped.
     const bytes = glib.Bytes.new(mapped.ptr, len);
-    defer bytes.unref();
-
-    const tex = gdk.MemoryTexture.new(
-        @intCast(width),
-        @intCast(height),
-        .b8g8r8a8_premultiplied,
-        bytes,
-        stride,
-    );
-
-    // setTexture takes its own ref; drop our construction ref.
-    paintable.setTexture(tex.as(gdk.Texture));
-    tex.as(gobject.Object).unref();
-}
-
-/// glib.DestroyNotify trampoline that closes the dup'd dmabuf fd.
-/// `data` is the fd cast to a pointer (we never deref it as a
-/// pointer; the cast is just for the void* slot).
-fn fdDestroyNotify(data: ?*anyopaque) callconv(.c) void {
-    const fd: i32 = @intCast(@intFromPtr(data));
-    if (fd >= 0) std.posix.close(fd);
+    paintable.parkLegacy(bytes, width, height, stride);
 }
 
 /// Build a `VulkanPlatform` callback struct pointing at this
