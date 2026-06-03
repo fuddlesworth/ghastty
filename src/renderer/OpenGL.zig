@@ -100,7 +100,8 @@ pub fn deinit(self: *OpenGL) void {
     // teardown; the embedded host never populates it at all. This call is
     // therefore a no-op safety net that, in the normal case, issues no GL
     // calls without a current context. (If a slot somehow survived, its
-    // fd close is always safe.)
+    // `DmabufTarget.deinit` would also issue GL deletes with no current
+    // context — ignored in practice — and its fd close is always safe.)
     self.freeDmabufRing();
     self.* = undefined;
 }

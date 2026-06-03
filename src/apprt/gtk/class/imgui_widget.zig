@@ -276,15 +276,19 @@ pub const ImguiWidget = extern struct {
         }
 
         // Unrealize is not guaranteed to be called with a current GL context,
-        // so we make it current for ImGui cleanup.
+        // so we make it current for the ImGui OpenGL backend cleanup (which
+        // touches GPU objects). If that fails we skip only the GL-side
+        // shutdown — we must still destroy the ImGui context below so it is
+        // not leaked and a later re-realize doesn't trip the
+        // `ig_context == null` assertion in glAreaRealize.
         priv.gl_area.makeCurrent();
         if (priv.gl_area.getError()) |err| {
-            log.warn("GLArea for Dear ImGui widget failed to realize: {s}", .{err.f_message orelse "(unknown)"});
-            return;
+            log.warn("GLArea for Dear ImGui widget failed to make current during unrealize: {s}", .{err.f_message orelse "(unknown)"});
+        } else {
+            cimgui.c.ImGui_SetCurrentContext(ig_context);
+            cimgui.ImGui_ImplOpenGL3_ShutdownWithLoaderCleanup();
         }
 
-        self.setCurrentContext() catch return;
-        cimgui.ImGui_ImplOpenGL3_ShutdownWithLoaderCleanup();
         cimgui.c.ImGui_DestroyContext(ig_context);
         priv.ig_context = null;
     }
