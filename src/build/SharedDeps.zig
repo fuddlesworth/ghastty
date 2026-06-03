@@ -10,6 +10,24 @@ const UnicodeTables = @import("UnicodeTables.zig");
 const GhosttyFrameData = @import("GhosttyFrameData.zig");
 const VulkanSpv = @import("VulkanSpv.zig");
 const DistResource = @import("GhosttyDist.zig").Resource;
+const Backend = @import("../renderer/backend.zig").Backend;
+
+/// Whether backend `b`'s build deps should be linked/generated. GTK on
+/// Linux/BSD compiles BOTH OpenGL and Vulkan so the renderer can be
+/// chosen at runtime (with OpenGL fallback); every other target /
+/// app-runtime keeps the single configured backend. Must stay in lockstep
+/// with `renderer.zig`'s `compiledIn`.
+fn rendererCompiled(cfg: *const Config, comptime b: Backend) bool {
+    const t = cfg.target.result;
+    if (cfg.app_runtime == .gtk and
+        !t.os.tag.isDarwin() and
+        t.cpu.arch != .wasm32 and
+        t.cpu.arch != .wasm64)
+    {
+        return b == .opengl or b == .vulkan;
+    }
+    return b == cfg.renderer;
+}
 
 config: *const Config,
 
@@ -46,7 +64,7 @@ pub fn init(b: *std.Build, cfg: *const Config) !SharedDeps {
         // step entirely on non-Vulkan builds avoids paying for
         // a host-target glslang link the OpenGL/Metal renderers
         // would never use.
-        .vulkan_spv = if (cfg.renderer == .vulkan)
+        .vulkan_spv = if (rendererCompiled(cfg, .vulkan))
             try VulkanSpv.init(b, cfg)
         else
             null,
@@ -468,7 +486,7 @@ pub fn add(
     // The Vulkan binding is only loaded when the renderer is .vulkan
     // (still in development — see `src/renderer/Vulkan.zig`). Linking
     // libvulkan happens further down in `linkSystemDeps`.
-    if (self.config.renderer == .vulkan) {
+    if (rendererCompiled(self.config, .vulkan)) {
         if (b.lazyDependency("vulkan", .{})) |dep| {
             step.root_module.addImport("vulkan", dep.module("vulkan"));
         }
@@ -613,7 +631,7 @@ pub fn add(
     // glad (the OpenGL loader) is statically compiled whenever the
     // OpenGL renderer is in use. This includes the libghostty artifact:
     // the embedded apprt's OpenGL platform links against glad too.
-    if (self.config.renderer == .opengl) {
+    if (rendererCompiled(self.config, .opengl)) {
         step.addIncludePath(b.path("vendor/glad/include/"));
         step.addCSourceFile(.{
             .file = b.path("vendor/glad/src/gl.c"),
@@ -626,7 +644,7 @@ pub fn add(
     // module). On Linux this resolves to libvulkan.so via the standard
     // dynamic linker; Vulkan headers (`vulkan/vulkan.h`) come from the
     // standard system include path (`vulkan-headers` package).
-    if (self.config.renderer == .vulkan) {
+    if (rendererCompiled(self.config, .vulkan)) {
         step.linkSystemLibrary2("vulkan", dynamic_link_opts);
     }
 

@@ -8,6 +8,7 @@
 //! setup (OpenGL has a context, Vulkan has a surface, etc.)
 
 const build_config = @import("build_config.zig");
+const builtin = @import("builtin");
 const std = @import("std");
 const apprt = @import("apprt.zig");
 const font = @import("font/main.zig");
@@ -41,15 +42,31 @@ pub const Padding = size.Padding;
 pub const cursorStyle = cursor.style;
 pub const lib = @import("lib/main.zig");
 
-/// The concrete renderer implementation type for a backend, or `void`
-/// if that backend isn't compiled into this build.
+/// Whether backend `b` is compiled into this build.
 ///
-/// Phase 1: only `build_config.renderer` is compiled, so exactly one
-/// backend resolves to a real type and the rest are `void`. When runtime
-/// renderer selection lands this becomes "is `b` in the compiled set",
-/// and `Renderer` gains more than one live variant.
+/// GTK on Linux/BSD compiles BOTH the OpenGL and Vulkan backends so the
+/// renderer can be selected at runtime (with OpenGL fallback). Every
+/// other target / app-runtime keeps the single configured backend
+/// (`build_config.renderer`). This must stay in lockstep with the
+/// build-system's dep linking (`SharedDeps.rendererCompiled`).
+fn compiledIn(comptime b: Backend) bool {
+    const t = builtin.target;
+    if (build_config.app_runtime == .gtk and
+        !t.os.tag.isDarwin() and
+        t.cpu.arch != .wasm32 and
+        t.cpu.arch != .wasm64)
+    {
+        return b == .opengl or b == .vulkan;
+    }
+    return b == build_config.renderer;
+}
+
+/// The concrete renderer implementation type for a backend, or `void`
+/// if that backend isn't compiled into this build (see `compiledIn`).
+/// `void` variants are never constructed and their dispatch arms compile
+/// to nothing.
 fn BackendImpl(comptime b: Backend) type {
-    if (b != build_config.renderer) return void;
+    if (!compiledIn(b)) return void;
     return switch (b) {
         .opengl => GenericRenderer(OpenGL),
         .metal => GenericRenderer(Metal),
