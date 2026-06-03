@@ -2013,6 +2013,23 @@ keybind: Keybinds = .{},
 /// This setting is only supported currently on macOS.
 @"window-vsync": bool = true,
 
+/// The GPU rendering backend to use, for app runtimes that support more
+/// than one. This is frontend-agnostic: each app runtime honors the
+/// values it supports and ignores the rest (logging a warning and
+/// falling back).
+///
+///   * `auto` — pick the best available backend for the platform. On
+///     GTK/Linux this prefers Vulkan when it can be brought up and
+///     otherwise uses OpenGL.
+///   * `opengl` — force the OpenGL renderer.
+///   * `vulkan` — force the Vulkan renderer (GTK/Linux). Falls back to
+///     OpenGL if Vulkan is unavailable.
+///   * `metal` — force the Metal renderer (macOS).
+///
+/// Only the backends compiled into the build are selectable; an
+/// unavailable choice falls back. Changing this value requires a restart.
+renderer: Renderer = .auto,
+
 /// If true, new windows will inherit the working directory of the
 /// previously focused window. If no window was previously focused, the default
 /// working directory will be used (the `working-directory` option).
@@ -8982,6 +8999,15 @@ pub const WindowTheme = enum {
 pub const WindowColorspace = enum {
     srgb,
     @"display-p3",
+};
+
+/// See the `renderer` config option. Frontend-agnostic renderer choice;
+/// app runtimes map these onto the backends they compile in.
+pub const Renderer = enum {
+    auto,
+    opengl,
+    vulkan,
+    metal,
 };
 
 /// See macos-window-buttons

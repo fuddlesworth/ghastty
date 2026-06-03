@@ -297,6 +297,14 @@ pub const Application = extern struct {
             log.warn("i18n initialization failed error={}", .{err});
         };
 
+        // Select the renderer backend for this process before GTK init or
+        // any surface is created — both `setGtkEnv` and the Surface ctor
+        // read `renderer.activeBackend()`. Honors the `renderer` config;
+        // for `auto`/`vulkan` it probes Vulkan availability and falls back
+        // to OpenGL when Vulkan can't be brought up. No-op on builds with a
+        // single compiled backend.
+        rendererpkg.setActiveBackend(selectBackend(&config));
+
         // Setup our GTK init env vars
         setGtkEnv(&config) catch |err| switch (err) {
             error.NoSpaceLeft => {
@@ -2855,6 +2863,36 @@ const Action = struct {
 /// given the runtime environment or configuration.
 ///
 /// This must be called BEFORE GTK initialization.
+/// Pick the renderer backend from the `renderer` config, honoring only
+/// backends compiled into this build and probing Vulkan availability for
+/// `auto`/`vulkan` (with OpenGL fallback). Called once at startup before
+/// GTK init.
+fn selectBackend(config: *const CoreConfig) rendererpkg.Backend {
+    return switch (config.renderer) {
+        .opengl => .opengl,
+        .auto => if (vulkanUsable()) .vulkan else .opengl,
+        .vulkan => if (vulkanUsable()) .vulkan else blk: {
+            log.warn("config renderer=vulkan but Vulkan is unavailable; using OpenGL", .{});
+            break :blk .opengl;
+        },
+        .metal => if (rendererpkg.compiledIn(.metal)) .metal else blk: {
+            log.warn("config renderer=metal not available in this build; using OpenGL", .{});
+            break :blk .opengl;
+        },
+    };
+}
+
+/// Whether the Vulkan backend is compiled in AND can bring up a device on
+/// this system. Probing creates the process-wide Vulkan host lazily; we
+/// only call this for `auto`/`vulkan` so an OpenGL choice never pays for
+/// a VkInstance.
+fn vulkanUsable() bool {
+    return if (rendererpkg.compiledIn(.vulkan))
+        vulkan_host.instance() != null
+    else
+        false;
+}
+
 fn setGtkEnv(config: *const CoreConfig) error{NoSpaceLeft}!void {
     assert(gtk.isInitialized() == 0);
 
