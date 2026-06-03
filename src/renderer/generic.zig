@@ -145,7 +145,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// The current set of cells to render. This is rebuilt on every frame
         /// but we keep this around so that we don't reallocate. Each set of
         /// cells goes into a separate shader.
-        cells: cellpkg.Contents,
+        cells: cellpkg.Cell(GraphicsAPI.shaders).Contents,
 
         /// Set to true after rebuildCells is called. This can be used
         /// to determine if any possible changes have been made to the
