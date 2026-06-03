@@ -19,7 +19,6 @@ const isCovering = cellpkg.isCovering;
 const rowNeverExtendBg = @import("row.zig").neverExtendBg;
 const Overlay = @import("Overlay.zig");
 const imagepkg = @import("image.zig");
-const ImageState = imagepkg.State;
 const shadertoy = @import("shadertoy.zig");
 const assert = @import("../quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
@@ -92,6 +91,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
         const shaderpkg = GraphicsAPI.shaders;
         const Shaders = shaderpkg.Shaders;
+
+        // Backend-dependent image types, instantiated for this backend.
+        const ImagePkg = imagepkg.Pkg(GraphicsAPI);
+        const ImageState = ImagePkg.State;
 
         /// Allocator that can be used
         alloc: std.mem.Allocator,
@@ -177,7 +180,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         images: ImageState = .empty,
 
         /// Background image, if we have one.
-        bg_image: ?imagepkg.Image = null,
+        bg_image: ?ImagePkg.Image = null,
         /// Set whenever the background image changes, signalling
         /// that the new background image needs to be uploaded to
         /// the GPU.
@@ -1719,7 +1722,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     },
                 };
 
-                const image: imagepkg.Image = .{
+                const image: ImagePkg.Image = .{
                     .pending = .{
                         .width = image_data.width,
                         .height = image_data.height,
