@@ -1,8 +1,6 @@
 const Self = @This();
 
 const std = @import("std");
-const build_config = @import("../../build_config.zig");
-const rendererpkg = @import("../../renderer.zig");
 const apprt = @import("../../apprt.zig");
 const configpkg = @import("../../config.zig");
 const CoreSurface = @import("../../Surface.zig");

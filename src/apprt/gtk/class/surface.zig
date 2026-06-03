@@ -3621,6 +3621,10 @@ pub const Surface = extern struct {
                     // context teardown).
                     ctx.as(gobject.Object).unref();
                     priv.gl_context = null;
+                    // Clear the late-bound copy handed to the OpenGL backend's
+                    // platform state (set in `glareaRealize`) so it doesn't
+                    // dangle after the context is freed; re-realize rebinds it.
+                    priv.opengl_state.gl_context = null;
                 }
             }
         } else if (renderer.activeBackend() != .vulkan) {
