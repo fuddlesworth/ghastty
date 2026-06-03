@@ -221,6 +221,20 @@ pub const ImguiWidget = extern struct {
             return;
         }
 
+        // Load ghostty's GL function pointers (glad) for this thread. glad's
+        // function table is threadlocal: the OpenGL renderer loads it on the
+        // app thread (mustDrawFromAppThread), but the Vulkan renderer runs on
+        // its own thread and never loads it here. Without this, the
+        // gl.clearColor/gl.clear calls in glAreaRender would dereference null
+        // function pointers and panic. Re-loading when the OpenGL renderer
+        // already loaded it on this thread is harmless: the pointers are
+        // context-independent on desktop GL. We intentionally do not unload on
+        // unrealize so the OpenGL renderer's shared table survives.
+        _ = gl.glad.load(null) catch |err| {
+            log.warn("failed to load GL functions for Dear ImGui widget: {}", .{err});
+            return;
+        };
+
         priv.ig_context = cimgui.c.ImGui_CreateContext(null) orelse {
             log.warn("unable to initialize Dear ImGui context", .{});
             return;
