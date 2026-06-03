@@ -57,12 +57,17 @@ pub fn complete(self: *const Self, sync: bool) void {
     gl.finish();
 
     // If there are any GL errors, consider the frame unhealthy.
-    const health: Health = if (gl.errors.getError()) .healthy else |_| .unhealthy;
+    var health: Health = if (gl.errors.getError()) .healthy else |_| .unhealthy;
 
-    // If the frame is healthy, present it.
+    // If the frame is healthy, present it. A present failure (e.g. the
+    // GTK dmabuf-export path can't export this frame, and that path has
+    // no GL-blit fallback) makes the frame unhealthy so `frameCompleted`
+    // reports it up the renderer-health path instead of silently
+    // presenting nothing every frame.
     if (health == .healthy) {
         self.renderer.api.present(self.target.*) catch |err| {
             log.err("Failed to present render target: err={}", .{err});
+            health = .unhealthy;
         };
     }
 

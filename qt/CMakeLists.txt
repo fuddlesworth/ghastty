@@ -53,11 +53,12 @@ find_package(LayerShellQt REQUIRED)
 # QPA native-handle accessors.
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(WAYLAND_CLIENT REQUIRED IMPORTED_TARGET wayland-client)
-# libEGL is only needed by the OpenGL variant — `EglDmabufTarget`
-# uses EGL_MESA_image_dma_buf_export to export an FBO-backed
-# texture as a dmabuf. The Vulkan variant gets dmabufs straight
-# from `VK_KHR_external_memory_fd` and never calls into EGL, so
-# the EGL pkg-config + IMPORTED_TARGET is gated below.
+# libEGL is needed by the OpenGL path's `EglDmabufTarget`, which uses
+# EGL_MESA_image_dma_buf_export to export an FBO-backed texture as a
+# dmabuf. With runtime renderer selection the OpenGL path is always
+# compiled, so EGL is now unconditionally REQUIRED (see line ~161). The
+# Vulkan path gets dmabufs straight from `VK_KHR_external_memory_fd` and
+# never calls into EGL.
 # libxkbcommon: derive the unshifted Unicode codepoint for a key event
 # from its XKB keycode, so libghostty's kitty encoder finds an entry for
 # punctuation keys (Qt's ev->key() reports the SHIFTED symbol, e.g.
@@ -122,30 +123,22 @@ get_filename_component(GHOSTTY_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
 set(GHOSTTY_LIB_DIR "${GHOSTTY_ROOT}/zig-out/lib")
 set(GHOSTTY_SO "${GHOSTTY_LIB_DIR}/ghostty-internal.so")
 
-# Variant: which libghostty.so this build links against. The
-# rendering backend is baked into libghostty (Zig builds with
-# `-Drenderer=opengl` vs `-Drenderer=vulkan` produce ABI-compatible
-# but functionally distinct .so's), so the variant here is purely a
-# *compile-time selector*. The binary name and install layout do
-# NOT change — `${CMAKE_INSTALL_BINDIR}/ghastty` and
-# `${CMAKE_INSTALL_LIBDIR}/libghostty.so` for both. Developers who
-# want both flavors installed at once should use distinct prefixes
-# (`cmake --install --prefix /tmp/ghastty-vulkan`).
-#
-# Set via `cmake -DGHASTTY_VARIANT=vulkan -S qt -B qt/build-vulkan`.
+# GHASTTY_VARIANT is OBSOLETE. The renderer is now selected at RUNTIME
+# (see GhosttySurface's ghostty_set_renderer wiring); both render paths
+# are always compiled and the linked libghostty must contain both
+# backends (`zig build -Dapp-runtime=none` on Linux). This cache var no
+# longer affects the build — it's retained only so existing
+# `-DGHASTTY_VARIANT=...` invocations don't error. The validation below
+# keeps rejecting typos for those callers.
 set(GHASTTY_VARIANT "opengl" CACHE STRING
-    "Renderer variant: opengl (default) or vulkan")
+    "Obsolete (renderer is selected at runtime); retained for back-compat")
 set_property(CACHE GHASTTY_VARIANT PROPERTY STRINGS opengl vulkan)
-# Validate the cache value: STRINGS only constrains the cmake-gui
-# dropdown, not the command-line. `-DGHASTTY_VARIANT=foo` would
-# otherwise silently fall into the OpenGL branch below.
 if(NOT GHASTTY_VARIANT STREQUAL "opengl" AND
    NOT GHASTTY_VARIANT STREQUAL "vulkan")
   message(FATAL_ERROR
     "GHASTTY_VARIANT='${GHASTTY_VARIANT}' is invalid; "
     "must be 'opengl' or 'vulkan'.")
 endif()
-message(STATUS "Building variant=${GHASTTY_VARIANT}")
 
 # The renderer (OpenGL vs Vulkan) is now selected at RUNTIME: both code
 # paths are compiled in and `GhosttySurface` picks per the libghostty

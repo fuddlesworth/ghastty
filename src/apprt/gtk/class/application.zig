@@ -14,6 +14,10 @@ const vulkan_host = if (rendererpkg.compiledIn(.vulkan))
     @import("../vulkan/Host.zig")
 else
     void;
+const opengl_host = if (rendererpkg.compiledIn(.vulkan))
+    @import("../opengl/Host.zig")
+else
+    void;
 const build_info = @import("../build/info.zig");
 const state = &@import("../../../global.zig").state;
 const i18n = @import("../../../os/main.zig").i18n;
@@ -472,12 +476,17 @@ pub const Application = extern struct {
         for (priv.custom_css_providers.items) |provider| provider.unref();
         priv.custom_css_providers.deinit(alloc);
 
-        // Tear down the process-wide Vulkan host last. We're past the
+        // Tear down the process-wide render hosts last. We're past the
         // main loop here, so every surface is finalized and its
         // renderer thread (which borrows the host's VkDevice/Instance)
-        // is joined. No-op + idempotent if Vulkan was never brought up
-        // or deinit runs twice (terminate() then finalize()).
-        if (rendererpkg.compiledIn(.vulkan)) vulkan_host.deinit();
+        // is joined. Both are no-ops + idempotent if the backend was
+        // never brought up or deinit runs twice (terminate() then
+        // finalize()): the Vulkan host frees its VkDevice/Instance, the
+        // OpenGL host closes its dlopen'd libEGL handle.
+        if (rendererpkg.compiledIn(.vulkan)) {
+            vulkan_host.deinit();
+            opengl_host.deinit();
+        }
     }
 
     /// The global allocator that all other classes should use by

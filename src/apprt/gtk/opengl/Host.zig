@@ -130,6 +130,20 @@ fn ensureLib() bool {
     return true;
 }
 
+/// Close the dlopen'd libEGL handle. Process-singleton teardown — call
+/// after the main loop, once every surface is finalized (no callback
+/// resolves EGL entry points after this). Idempotent; no-op if libEGL
+/// was never opened. Mirrors `vulkan_host.deinit`.
+pub fn deinit() void {
+    if (egl_lib) |*lib| {
+        lib.close();
+        egl_lib = null;
+    }
+    get_proc_address = null;
+    query_string = null;
+    probe = .unknown;
+}
+
 /// Build an `OpenGLPlatform` for a surface. `state` lives on the apprt
 /// surface; libghostty hands it back to each callback.
 pub fn asPlatform(state: *Surface) apprt.platform.OpenGLPlatform {

@@ -451,12 +451,15 @@ fn displayIsWayland(display: *gdk.Display) bool {
 /// LINEAR modifier) and is also how we deliberately steer X11 — see
 /// the backend gate below.
 /// Threading: reached via `pickModifier` inside `Target.init`, which the
-/// renderer runs on its own thread (not the GUI thread). The GDK calls
-/// here are read-only on process-global / immutable data —
-/// `gdk_display_get_default()` returns the global display pointer (set
-/// once at startup) and `gdk_display_get_dmabuf_formats()` returns an
-/// immutable, ref-counted `GdkDmabufFormats` — so this is safe off the
-/// GUI thread (unlike GDK's mutating/event-loop APIs, which are not).
+/// renderer runs on its own thread (not the GUI thread). This is safe
+/// because GDK documents `gdk_display_get_dmabuf_formats()` as threadsafe
+/// — callable from any thread (it lazily initializes the formats on first
+/// use) — and `gdk_display_get_default()` returns the global display
+/// pointer set once at startup. The returned `GdkDmabufFormats` is
+/// transfer-none (borrowed); we only read it within this call. GDK does
+/// not swap the display's formats object at runtime in normal operation,
+/// so the borrowed read is sound. (GDK's mutating / event-loop APIs are
+/// NOT threadsafe — only this getter is.)
 fn cbGetSupportedModifiers(
     _: ?*anyopaque,
     drm_format: u32,
