@@ -20,11 +20,9 @@
 namespace wayland {
 class SubsurfacePresenter;
 }
-#ifndef GHASTTY_USE_VULKAN
 namespace opengl {
 class EglDmabufTarget;
 }
-#endif
 
 class MainWindow;
 class QContextMenuEvent;
@@ -49,8 +47,9 @@ class OverlayScrollbar;
 //
 // Terminal pixels reach the screen via a wl_subsurface attached to
 // the top-level QWindow's wl_surface (see wayland::SubsurfacePresenter).
-// libghostty's renderer (Vulkan or OpenGL, picked at compile time
-// via GHASTTY_USE_VULKAN) hands us a dmabuf fd per frame; we wrap
+// libghostty's renderer (Vulkan or OpenGL, picked at runtime — see
+// the ctor's ghostty_set_renderer wiring) hands us a dmabuf fd per
+// frame (Vulkan) or we export one from the GL FBO (OpenGL); we wrap
 // it in a wl_buffer via zwp_linux_dmabuf_v1 and the compositor
 // scans it out directly — no readback, no QPainter blit for the
 // terminal area. Each pane in a split is a sibling subsurface
@@ -298,22 +297,17 @@ private:
   QOpenGLContext *m_context = nullptr;
   QOffscreenSurface *m_offscreen = nullptr;
   QOpenGLFramebufferObject *m_fbo = nullptr;
-#ifndef GHASTTY_USE_VULKAN
-  // Dmabuf-exporting GL target (zero-copy path). Set when the EGL
-  // display advertises EGL_MESA_image_dma_buf_export and the
-  // wl_subsurface presenter is up; the renderer draws into this
-  // texture-backed framebuffer and we attach its fd straight to the
-  // subsurface — no glReadPixels, no QImage, no QPainter blit.
-  // Stays null when EGL support is missing or the subsurface failed
-  // to bring up, and the legacy m_fbo path runs as fallback.
-  //
-  // Vulkan-variant builds export dmabufs directly from
-  // VkDeviceMemory via VK_KHR_external_memory_fd and never touch
-  // EGL, so the field (and the entire EglDmabufTarget translation
-  // unit) is excluded from those binaries — matching the libEGL
-  // gating in qt/CMakeLists.txt.
+  // Dmabuf-exporting GL target (OpenGL zero-copy path). Set when the
+  // active backend is OpenGL, the EGL display advertises
+  // EGL_MESA_image_dma_buf_export, and the wl_subsurface presenter is
+  // up; the renderer draws into this texture-backed framebuffer and we
+  // attach its fd straight to the subsurface — no glReadPixels, no
+  // QImage, no QPainter blit. Stays null on the Vulkan backend (which
+  // exports dmabufs directly from VkDeviceMemory), when EGL support is
+  // missing, or when the subsurface failed to bring up (the legacy
+  // m_fbo path then runs as fallback). Always compiled now that the
+  // renderer is selected at runtime.
   std::unique_ptr<opengl::EglDmabufTarget> m_eglTarget;
-#endif
   QImage m_image;                      // last frame, read back from m_fbo
 
   // True when this surface is using the Vulkan platform. The

@@ -147,22 +147,18 @@ if(NOT GHASTTY_VARIANT STREQUAL "opengl" AND
 endif()
 message(STATUS "Building variant=${GHASTTY_VARIANT}")
 
-# Compile-time renderer pick. Each binary is linked against exactly
-# one libghostty.so variant (opengl or vulkan), so the renderer
-# choice is inherent to the binary — no need for a runtime env var.
-# GhosttySurface.cpp branches on GHASTTY_USE_VULKAN to spin up the
-# Vulkan host vs the OpenGL context.
-if(GHASTTY_VARIANT STREQUAL "vulkan")
-  add_compile_definitions(GHASTTY_USE_VULKAN)
-endif()
+# The renderer (OpenGL vs Vulkan) is now selected at RUNTIME: both code
+# paths are compiled in and `GhosttySurface` picks per the libghostty
+# `renderer` config plus a Vulkan-availability probe, calling
+# `ghostty_set_renderer()` so the core constructs the matching backend.
+# This requires a libghostty that compiles both backends (Linux
+# `zig build -Dapp-runtime=none`). GHASTTY_VARIANT is retained only so
+# existing `-DGHASTTY_VARIANT=...` invocations don't error; it no longer
+# affects the build.
 
-# libEGL: needed by `opengl/EglDmabufTarget.cpp` for the OpenGL
-# variant's zero-copy present path. Vulkan-variant binaries never
-# pull in this source file (gated below) so the loader doesn't have
-# to be installed for Vulkan-only systems.
-if(GHASTTY_VARIANT STREQUAL "opengl")
-  pkg_check_modules(EGL REQUIRED IMPORTED_TARGET egl)
-endif()
+# libEGL (opengl/EglDmabufTarget.cpp's zero-copy export) is now always
+# required since the OpenGL path is always compiled.
+pkg_check_modules(EGL REQUIRED IMPORTED_TARGET egl)
 
 if(NOT EXISTS "${GHOSTTY_SO}")
   message(FATAL_ERROR
@@ -223,23 +219,12 @@ add_executable(ghastty
   "${ALPHAMOD_HEADER}"
 )
 
-# Vulkan host glue is variant-only. Adding it to the OpenGL build
-# would force an unconditional libvulkan link on a binary that
-# never calls into Vulkan, contradicting the side-by-side
-# `~/.local/lib/libghostty.so` story that the variant block above
-# documents.
-if(GHASTTY_VARIANT STREQUAL "vulkan")
-  target_sources(ghastty PRIVATE src/vulkan/Host.cpp)
-endif()
-
-# `opengl/EglDmabufTarget.cpp` is OpenGL-variant only. The Vulkan
-# variant exports dmabufs straight from VkDeviceMemory via
-# VK_KHR_external_memory_fd and never calls into EGL, so excluding
-# this source file from the Vulkan binary lets it stay free of
-# libEGL too.
-if(GHASTTY_VARIANT STREQUAL "opengl")
-  target_sources(ghastty PRIVATE src/opengl/EglDmabufTarget.cpp)
-endif()
+# Both render paths are compiled now (runtime selection): the Vulkan
+# host glue and the OpenGL EGL-dmabuf target. GhosttySurface picks
+# between them per frame on `m_useVulkan`.
+target_sources(ghastty PRIVATE
+  src/vulkan/Host.cpp
+  src/opengl/EglDmabufTarget.cpp)
 
 # Embed the app icon so it is available even running from the build tree.
 qt_add_resources(ghastty "appicon"
@@ -267,21 +252,12 @@ target_link_libraries(ghastty PRIVATE
   "${GHOSTTY_LINK_SO}"
 )
 
-# libEGL is OpenGL-variant only — gated alongside the source file
-# in the variant block above. Vulkan-variant binaries don't pull
-# in libEGL at all.
-if(GHASTTY_VARIANT STREQUAL "opengl")
-  target_link_libraries(ghastty PRIVATE PkgConfig::EGL)
-endif()
-
-# libvulkan is Vulkan-variant only. The OpenGL variant compiles
-# nothing that references Vulkan symbols (vulkan/Host.cpp is gated
-# above), so not linking libvulkan keeps OpenGL-only systems from
-# needing the loader installed at runtime — matching the
-# documented side-by-side variant story above.
-if(GHASTTY_VARIANT STREQUAL "vulkan")
-  target_link_libraries(ghastty PRIVATE vulkan)
-endif()
+# Both render paths are compiled, so link both loaders: libEGL for the
+# OpenGL EGL-dmabuf export and libvulkan for the Vulkan host glue.
+# Runtime renderer selection means a host needs both available (the
+# Vulkan path degrades gracefully if the loader/driver can't bring up a
+# device — GhosttySurface then falls back to OpenGL).
+target_link_libraries(ghastty PRIVATE PkgConfig::EGL vulkan)
 
 # Hook up the private QPA headers (see find_package above).
 #
