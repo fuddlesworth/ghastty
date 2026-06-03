@@ -644,9 +644,12 @@ pub fn add(
     // module). On Linux this resolves to libvulkan.so via the standard
     // dynamic linker; Vulkan headers (`vulkan/vulkan.h`) come from the
     // standard system include path (`vulkan-headers` package).
-    if (rendererCompiled(self.config, .vulkan)) {
-        step.linkSystemLibrary2("vulkan", dynamic_link_opts);
-    }
+    // NOTE: libvulkan is intentionally NOT linked. The Vulkan host
+    // `dlopen`s it at runtime (apprt/gtk/vulkan/Host.zig) so the binary
+    // launches — and falls back to OpenGL — on machines without a Vulkan
+    // loader. The renderer resolves its own dispatch via the host-provided
+    // `vkGetInstanceProcAddr`, so nothing references libvulkan symbols at
+    // link time.
 
     // If we're building an exe then we have additional dependencies.
     if (step.kind != .lib) {

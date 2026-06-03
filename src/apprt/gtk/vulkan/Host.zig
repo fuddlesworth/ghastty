@@ -68,6 +68,34 @@ var once_mutex: std.Thread.Mutex = .{};
 var once_done: bool = false;
 var host: ?Host = null;
 
+/// `vkGetInstanceProcAddr` function-pointer type.
+const GipaFn = std.meta.Child(vk.PFN_vkGetInstanceProcAddr);
+
+/// The Vulkan entry points the host needs, resolved at runtime from a
+/// `dlopen`'d libvulkan via `vkGetInstanceProcAddr`. We do NOT link
+/// libvulkan: the binary must launch (and fall back to OpenGL) on
+/// machines without a Vulkan loader. The renderer resolves its own
+/// device-level dispatch separately (see `pkg/vulkan/Device.zig`), so
+/// this only covers the instance/device bring-up the host performs.
+const Dispatch = struct {
+    getInstanceProcAddr: GipaFn,
+    createInstance: std.meta.Child(vk.PFN_vkCreateInstance),
+    enumeratePhysicalDevices: std.meta.Child(vk.PFN_vkEnumeratePhysicalDevices),
+    getPhysicalDeviceProperties: std.meta.Child(vk.PFN_vkGetPhysicalDeviceProperties),
+    getPhysicalDeviceQueueFamilyProperties: std.meta.Child(vk.PFN_vkGetPhysicalDeviceQueueFamilyProperties),
+    enumerateDeviceExtensionProperties: std.meta.Child(vk.PFN_vkEnumerateDeviceExtensionProperties),
+    createDevice: std.meta.Child(vk.PFN_vkCreateDevice),
+    getDeviceQueue: std.meta.Child(vk.PFN_vkGetDeviceQueue),
+    destroyDevice: std.meta.Child(vk.PFN_vkDestroyDevice),
+    deviceWaitIdle: std.meta.Child(vk.PFN_vkDeviceWaitIdle),
+    destroyInstance: std.meta.Child(vk.PFN_vkDestroyInstance),
+};
+
+/// Set once by `bringUp` on success; only read after `host` is non-null,
+/// so no synchronization beyond the `once_*` gate is needed.
+var dispatch: Dispatch = undefined;
+var vk_lib: ?std.DynLib = null;
+
 pub const Host = struct {
     instance_handle: vk.VkInstance,
     physical_device_handle: vk.VkPhysicalDevice,
@@ -122,9 +150,13 @@ pub fn deinit() void {
     once_mutex.lock();
     defer once_mutex.unlock();
     const h = if (host) |*h| h else return;
-    _ = vk.vkDeviceWaitIdle(h.device_handle);
-    vk.vkDestroyDevice(h.device_handle, null);
-    vk.vkDestroyInstance(h.instance_handle, null);
+    _ = dispatch.deviceWaitIdle(h.device_handle);
+    dispatch.destroyDevice(h.device_handle, null);
+    dispatch.destroyInstance(h.instance_handle, null);
+    if (vk_lib) |*lib| {
+        lib.close();
+        vk_lib = null;
+    }
     host = null;
     // `once_done` stays true: re-initializing after shutdown is
     // unsupported, and leaving it set makes any late `instance()`
@@ -132,6 +164,7 @@ pub fn deinit() void {
 }
 
 const Error = error{
+    LoaderNotFound,
     InstanceCreateFailed,
     NoPhysicalDevices,
     NoSuitablePhysicalDevice,
@@ -139,6 +172,20 @@ const Error = error{
 };
 
 fn bringUp(out: *Host) Error!void {
+    // ---- loader -----------------------------------------------------
+    // dlopen libvulkan (not linked) so the binary launches on systems
+    // without a Vulkan loader and falls back to OpenGL.
+    var lib = std.DynLib.open("libvulkan.so.1") catch
+        std.DynLib.open("libvulkan.so") catch
+        return error.LoaderNotFound;
+    errdefer lib.close();
+
+    const getInstanceProcAddr = lib.lookup(GipaFn, "vkGetInstanceProcAddr") orelse
+        return error.LoaderNotFound;
+    const createInstance: std.meta.Child(vk.PFN_vkCreateInstance) =
+        @ptrCast(getInstanceProcAddr(null, "vkCreateInstance") orelse
+            return error.LoaderNotFound);
+
     // ---- instance ---------------------------------------------------
     var app_info: vk.VkApplicationInfo = .{
         .sType = vk.VK_STRUCTURE_TYPE_APPLICATION_INFO,
@@ -160,26 +207,46 @@ fn bringUp(out: *Host) Error!void {
         .ppEnabledExtensionNames = null,
     };
     var inst: vk.VkInstance = undefined;
-    if (vk.vkCreateInstance(&inst_info, null, &inst) != vk.VK_SUCCESS) {
+    if (createInstance(&inst_info, null, &inst) != vk.VK_SUCCESS) {
         return error.InstanceCreateFailed;
     }
-    errdefer vk.vkDestroyInstance(inst, null);
+
+    // Resolve instance-level entry points. Load destroyInstance first so
+    // the errdefer can clean up if a later resolve fails.
+    const destroyInstance: std.meta.Child(vk.PFN_vkDestroyInstance) =
+        @ptrCast(getInstanceProcAddr(inst, "vkDestroyInstance") orelse
+            return error.InstanceCreateFailed);
+    errdefer destroyInstance(inst, null);
+
+    dispatch = .{
+        .getInstanceProcAddr = getInstanceProcAddr,
+        .createInstance = createInstance,
+        .destroyInstance = destroyInstance,
+        .enumeratePhysicalDevices = @ptrCast(getInstanceProcAddr(inst, "vkEnumeratePhysicalDevices") orelse return error.InstanceCreateFailed),
+        .getPhysicalDeviceProperties = @ptrCast(getInstanceProcAddr(inst, "vkGetPhysicalDeviceProperties") orelse return error.InstanceCreateFailed),
+        .getPhysicalDeviceQueueFamilyProperties = @ptrCast(getInstanceProcAddr(inst, "vkGetPhysicalDeviceQueueFamilyProperties") orelse return error.InstanceCreateFailed),
+        .enumerateDeviceExtensionProperties = @ptrCast(getInstanceProcAddr(inst, "vkEnumerateDeviceExtensionProperties") orelse return error.InstanceCreateFailed),
+        .createDevice = @ptrCast(getInstanceProcAddr(inst, "vkCreateDevice") orelse return error.InstanceCreateFailed),
+        .getDeviceQueue = @ptrCast(getInstanceProcAddr(inst, "vkGetDeviceQueue") orelse return error.InstanceCreateFailed),
+        .destroyDevice = @ptrCast(getInstanceProcAddr(inst, "vkDestroyDevice") orelse return error.InstanceCreateFailed),
+        .deviceWaitIdle = @ptrCast(getInstanceProcAddr(inst, "vkDeviceWaitIdle") orelse return error.InstanceCreateFailed),
+    };
 
     // ---- physical device + queue family ----------------------------
     var pd_count: u32 = 0;
-    _ = vk.vkEnumeratePhysicalDevices(inst, &pd_count, null);
+    _ = dispatch.enumeratePhysicalDevices(inst, &pd_count, null);
     if (pd_count == 0) return error.NoPhysicalDevices;
 
     var pds_buf: [16]vk.VkPhysicalDevice = undefined;
     const pds = pds_buf[0..@min(pd_count, pds_buf.len)];
     pd_count = @intCast(pds.len);
-    _ = vk.vkEnumeratePhysicalDevices(inst, &pd_count, pds.ptr);
+    _ = dispatch.enumeratePhysicalDevices(inst, &pd_count, pds.ptr);
 
     var picked_pd: vk.VkPhysicalDevice = null;
     var picked_qfi: u32 = 0;
     for (pds[0..pd_count]) |pd| {
         var props: vk.VkPhysicalDeviceProperties = undefined;
-        vk.vkGetPhysicalDeviceProperties(pd, &props);
+        dispatch.getPhysicalDeviceProperties(pd, &props);
         if (props.apiVersion < vk.VK_API_VERSION_1_3) continue;
         if (!hasRequiredExtensions(pd)) continue;
         const qfi = findGraphicsQueueFamily(pd) orelse continue;
@@ -238,15 +305,15 @@ fn bringUp(out: *Host) Error!void {
     };
 
     var dev: vk.VkDevice = undefined;
-    if (vk.vkCreateDevice(picked_pd, &dci, null, &dev) != vk.VK_SUCCESS) {
+    if (dispatch.createDevice(picked_pd, &dci, null, &dev) != vk.VK_SUCCESS) {
         return error.DeviceCreateFailed;
     }
 
     var queue: vk.VkQueue = undefined;
-    vk.vkGetDeviceQueue(dev, picked_qfi, 0, &queue);
+    dispatch.getDeviceQueue(dev, picked_qfi, 0, &queue);
 
     var props: vk.VkPhysicalDeviceProperties = undefined;
-    vk.vkGetPhysicalDeviceProperties(picked_pd, &props);
+    dispatch.getPhysicalDeviceProperties(picked_pd, &props);
     log.info("device ready: {s} (Vulkan {d}.{d}.{d}, qfi={d})", .{
         std.mem.sliceTo(&props.deviceName, 0),
         vk.VK_API_VERSION_MAJOR(props.apiVersion),
@@ -254,6 +321,10 @@ fn bringUp(out: *Host) Error!void {
         vk.VK_API_VERSION_PATCH(props.apiVersion),
         picked_qfi,
     });
+
+    // Success: keep libvulkan loaded for the process lifetime (closed in
+    // `deinit`). `dispatch` was already published above.
+    vk_lib = lib;
 
     out.* = .{
         .instance_handle = inst,
@@ -266,7 +337,7 @@ fn bringUp(out: *Host) Error!void {
 
 fn hasRequiredExtensions(pd: vk.VkPhysicalDevice) bool {
     var n: u32 = 0;
-    _ = vk.vkEnumerateDeviceExtensionProperties(pd, null, &n, null);
+    _ = dispatch.enumerateDeviceExtensionProperties(pd, null, &n, null);
     if (n == 0) return false;
 
     // Heap-allocate via a fixed-buffer fallback so we don't pull
@@ -277,7 +348,7 @@ fn hasRequiredExtensions(pd: vk.VkPhysicalDevice) bool {
     var buf: [256]vk.VkExtensionProperties = undefined;
     const cap: u32 = @intCast(@min(n, buf.len));
     n = cap;
-    _ = vk.vkEnumerateDeviceExtensionProperties(pd, null, &n, &buf);
+    _ = dispatch.enumerateDeviceExtensionProperties(pd, null, &n, &buf);
 
     for (required_device_extensions) |req| {
         var found = false;
@@ -296,12 +367,12 @@ fn hasRequiredExtensions(pd: vk.VkPhysicalDevice) bool {
 
 fn findGraphicsQueueFamily(pd: vk.VkPhysicalDevice) ?u32 {
     var n: u32 = 0;
-    vk.vkGetPhysicalDeviceQueueFamilyProperties(pd, &n, null);
+    dispatch.getPhysicalDeviceQueueFamilyProperties(pd, &n, null);
     if (n == 0) return null;
     var buf: [16]vk.VkQueueFamilyProperties = undefined;
     const cap: u32 = @intCast(@min(n, buf.len));
     n = cap;
-    vk.vkGetPhysicalDeviceQueueFamilyProperties(pd, &n, &buf);
+    dispatch.getPhysicalDeviceQueueFamilyProperties(pd, &n, &buf);
     for (buf[0..n], 0..) |q, i| {
         if (q.queueFlags & vk.VK_QUEUE_GRAPHICS_BIT != 0) return @intCast(i);
     }
@@ -319,7 +390,7 @@ fn cbGetInstanceProcAddr(
     name: [*:0]const u8,
 ) callconv(.c) ?*anyopaque {
     const h = instance() orelse return null;
-    const fp = vk.vkGetInstanceProcAddr(h.instance_handle, name) orelse
+    const fp = dispatch.getInstanceProcAddr(h.instance_handle, name) orelse
         return null;
     // PFN_vkVoidFunction is a `?*const fn() callconv(.c) void`. The
     // platform contract returns `?*anyopaque`; libghostty's loader
