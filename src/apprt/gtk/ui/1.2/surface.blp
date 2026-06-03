@@ -31,12 +31,14 @@ Overlay terminal_page {
       hexpand: true;
       vexpand: true;
 
-      // Overlaid on top of the render widget. On OpenGL builds the apprt
-      // never assigns a paintable, so this renders nothing (fully
-      // transparent) and the GLArea below shows through; `can-target:
-      // false` lets input pass to it. On Vulkan builds the apprt assigns
-      // a per-surface `DmabufPaintable` from `class/surface.zig` and this
-      // is what the user sees.
+      // Overlaid on top of the render widget. On the dmabuf present modes
+      // (Vulkan, or OpenGL with EGL dmabuf export) the apprt assigns a
+      // per-surface `DmabufPaintable` from `class/surface.zig` over a
+      // GtkDrawingArea, and this is what the user sees. On the GtkGLArea
+      // fallback (OpenGL without dmabuf export) no paintable is assigned,
+      // so this renders nothing (fully transparent) and the GLArea below
+      // shows through. `can-target: false` lets input pass to the widget
+      // below in every mode.
       [overlay]
       Picture present_picture {
         // Stretches the dmabuf texture to the widget's pixel size.

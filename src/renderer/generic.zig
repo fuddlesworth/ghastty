@@ -1407,7 +1407,16 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             // Wait for a frame to be available.
             const frame = try self.swap_chain.nextFrame();
-            errdefer self.swap_chain.releaseFrame();
+            // The frame's swap-chain permit must be released exactly once.
+            // Once a frame context exists, `frame_ctx.complete` (→
+            // frameCompleted → releaseFrame) owns that release; before then,
+            // this errdefer covers an early error (shader reinit / atlas
+            // sync / beginFrame). Without the `frame_released` guard, an
+            // error AFTER `complete` is deferred would release twice and
+            // over-post the semaphore → a future nextFrame could reuse a
+            // frame the GPU isn't done with.
+            var frame_released = false;
+            errdefer if (!frame_released) self.swap_chain.releaseFrame();
             // log.debug("drawing frame index={}", .{self.swap_chain.frame_index});
 
             // If we need to reinitialize our shaders, do so.
@@ -1503,6 +1512,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             // Get a frame context from the graphics API.
             var frame_ctx = try self.api.beginFrame(self, &frame.target);
+            // `complete` (always called via this defer) now owns the
+            // swap-chain permit release, so the errdefer above must not
+            // also release it.
+            frame_released = true;
             defer frame_ctx.complete(sync);
 
             {
