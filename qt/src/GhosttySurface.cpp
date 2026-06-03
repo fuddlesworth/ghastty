@@ -2146,8 +2146,13 @@ void GhosttySurface::presentVulkanDmabuf(
     const int parked_fd = ::dup(dmabuf_fd);
     if (parked_fd < 0) {
       // Out of fds or other syscall failure. Drop the frame; renderer
-      // will deliver another one next compositor refresh.
-      m_compositorReady = true;  // unblock our own backpressure
+      // will deliver another one next compositor refresh. Take the
+      // mutex to set the flag — every other access to m_compositorReady
+      // is mutex-guarded, so this one must be too.
+      {
+        std::lock_guard<std::mutex> lg(m_compositorMutex);
+        m_compositorReady = true;  // unblock our own backpressure
+      }
       m_compositorCv.notify_all();
       return;
     }

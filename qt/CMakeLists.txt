@@ -2,14 +2,17 @@ cmake_minimum_required(VERSION 3.16)
 # C is needed for the wayland-scanner-generated protocol code.
 project(ghastty LANGUAGES CXX C)
 
-# Ghastty: a Qt6 frontend for Ghostty that embeds libghostty through the
-# GHOSTTY_PLATFORM_OPENGL C API. libghostty's OpenGL renderer draws each
-# terminal into an offscreen framebuffer (a private QOpenGLContext); the
-# frame is read back into a QImage and painted on an ordinary translucent
-# QWidget. That keeps the terminal a plain widget — it embeds in the
-# tab/split tree and its transparent background composites like any other
-# widget. libghostty draws on the GUI thread (the embedded apprt sets
-# must_draw_from_app_thread for the OpenGL renderer).
+# Ghastty: a Qt6 frontend for Ghostty that embeds libghostty through its
+# C API. The renderer (OpenGL or Vulkan) is selected at RUNTIME — both
+# paths are compiled and GhosttySurface picks one via ghostty_set_renderer
+# (see its ctor). On the OpenGL path libghostty draws into a private
+# QOpenGLContext FBO that is either exported zero-copy as a dmabuf
+# (EglDmabufTarget → wl_subsurface) or read back into a QImage; on the
+# Vulkan path frames come back as dmabuf fds (VK_KHR_external_memory_fd)
+# presented via a wl_subsurface. Terminal pixels reach the screen via a
+# subsurface (zero-copy) with the QWidget kept translucent so chrome
+# composites on top. OpenGL draws on the GUI thread (the embedded apprt's
+# mustDrawFromAppThread() is true for OpenGL).
 #
 # Build libghostty first, from the repo root. Use ReleaseFast: a Debug
 # build of libghostty leaves the whole terminal core unoptimized and

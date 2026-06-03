@@ -12,19 +12,20 @@
 //! caller). It never touches GDK: it `park`s the raw frame here
 //! (fd + metadata, or a CPU pixel copy) under `pending_mutex`. A
 //! GUI-thread `drain` then builds the `GdkTexture` and installs it
-//! via `setTexture`. Steady-state frames drain through a `g_idle`
-//! source; the resize path drains synchronously right after its
-//! draw so the new-size frame is on screen before size-allocate
-//! returns (no `content-fit:fill` stretch). Keeping every GDK call
-//! on the GUI thread — and out of the inline present — is what
-//! avoids the size-allocate re-entrancy crash. `setTexture` itself
-//! still swaps the texture pointer atomically since `f_snapshot`
-//! (GUI thread) may read it.
+//! via `installTexture`. Steady-state frames drain on a frame-clock
+//! tick callback paced to the compositor; the resize path drains
+//! synchronously right after its draw so the new-size frame is on
+//! screen before size-allocate returns (no `content-fit:fill`
+//! stretch). Keeping every GDK call on the GUI thread — and out of
+//! the inline present — is what avoids the size-allocate re-entrancy
+//! crash. `installTexture` still swaps the texture pointer atomically
+//! since `f_snapshot` (GUI thread) may read it.
 //!
 //! Lifetime. The paintable holds a strong ref on its current
-//! texture. `setTexture(null)` drops that ref, freeing the
-//! underlying `VkDeviceMemory` (via the destroy notify on the fd
-//! the texture was built around).
+//! texture. Replacing it (`installTexture`) drops the previous ref;
+//! `finalize` drops the last one — freeing the underlying
+//! `VkDeviceMemory` (via the destroy notify on the fd the texture was
+//! built around).
 
 const std = @import("std");
 const gdk = @import("gdk");
@@ -112,12 +113,11 @@ pub const DmabufPaintable = extern struct {
 
     const Private = struct {
         /// Currently displayed texture. Strong ref. May be null
-        /// before the first frame arrives. Mutated on the GUI
-        /// thread under normal operation, but `setTexture` is
-        /// callable from any thread (the renderer thread uses it).
-        ///
-        /// The pointer itself is swapped atomically; the texture's
-        /// refcount manipulations are atomic by GObject contract.
+        /// before the first frame arrives. Installed only on the GUI
+        /// thread (`installTexture`, from the drain); the pointer is
+        /// swapped atomically because `f_snapshot` (also GUI thread)
+        /// may read it between paints. Refcount manipulations are
+        /// atomic by GObject contract.
         texture: ?*gdk.Texture = null,
 
         /// Last known texture size, cached so the `intrinsicWidth`
