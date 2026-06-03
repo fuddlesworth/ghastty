@@ -36,6 +36,7 @@ pub const Codepoints = extern struct {
 pub const structs: std.StaticStringMap(StructInfo) = structs: {
     @setEvalBranchQuota(10_000);
     break :structs .initComptime(.{
+        .{ "GhosttyBuffer", StructInfo.init(lib.Buffer) },
         .{ "GhosttyCodepoints", StructInfo.init(Codepoints) },
         .{ "GhosttyColorRgb", StructInfo.init(color.RGB.C) },
         .{ "GhosttyDeviceAttributes", StructInfo.init(terminal.DeviceAttributes) },

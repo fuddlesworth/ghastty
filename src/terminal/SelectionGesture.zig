@@ -67,6 +67,7 @@
 const SelectionGesture = @This();
 
 const std = @import("std");
+const builtin = @import("builtin");
 const assert = std.debug.assert;
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
@@ -79,6 +80,16 @@ const Selection = @import("Selection.zig");
 const Terminal = @import("Terminal.zig");
 const point = @import("point.zig");
 
+const freestanding_wasm = builtin.target.cpu.arch == .wasm32 and
+    builtin.target.os.tag == .freestanding;
+
+/// Monotonic timestamp type for click-repeat detection.
+///
+/// Freestanding wasm cannot reference std.time.Instant because Zig's stdlib
+/// Instant type depends on POSIX timespec for that target, so represent the C
+/// API nanosecond timestamp directly as a u64 there.
+pub const Time = if (freestanding_wasm) u64 else std.time.Instant;
+
 /// The tracked pin of the initial left click along with the screen
 /// that the pin is part of.
 left_click_pin: ?*Pin,
@@ -89,7 +100,7 @@ left_click_screen_generation: usize,
 /// The left click time was the last time the left click was done, if the
 /// caller could provide one. If this is null then we only support single clicks.
 left_click_count: u3,
-left_click_time: ?std.time.Instant,
+left_click_time: ?Time,
 
 /// The selection behavior chosen for the active left-click gesture.
 left_click_behavior: Behavior,
@@ -220,7 +231,7 @@ pub const Press = struct {
     /// The time when the press event occurred. Use a monotonic timer.
     /// This can be null if you're on a system that doesn't support
     /// time for some reason. In that case, we only support single clicks.
-    time: ?std.time.Instant,
+    time: ?Time,
 
     /// The cell where the click was.
     ///
@@ -619,7 +630,7 @@ fn pressRepeat(
     const time = p.time orelse return error.PressRequiresReset;
     {
         const prev_time = self.left_click_time orelse return error.PressRequiresReset;
-        const since = time.since(prev_time);
+        const since = timeSince(time, prev_time);
         if (since > p.repeat_interval) return error.PressRequiresReset;
     }
 
@@ -651,6 +662,11 @@ fn pressRepeat(
         3, // We only support triple clicks max
     );
     self.left_click_behavior = p.behaviors[self.left_click_count - 1];
+}
+
+fn timeSince(time: Time, prev_time: Time) u64 {
+    if (comptime freestanding_wasm) return time -| prev_time;
+    return time.since(prev_time);
 }
 
 fn pressSelection(

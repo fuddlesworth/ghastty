@@ -24,6 +24,7 @@
 04cb
 0xdvc
 -4rh1t3ct0r7
+52dyd
 aalhendi
 aaron-ang
 abdurrahmanski
@@ -61,6 +62,7 @@ bleikurr
 bo2themax
 brentschroeter
 brianc442
+c0x0o
 cespare
 charliie-dev
 chernetskyi
@@ -172,6 +174,7 @@ markdorison
 markhuot
 marler8997
 marrocco-simone
+masterflitzer
 matkotiric
 mattn
 micaeljarniac

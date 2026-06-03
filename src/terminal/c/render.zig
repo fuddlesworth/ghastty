@@ -466,6 +466,8 @@ pub const RowCellsData = enum(c_int) {
     bg_color = 5,
     fg_color = 6,
     selected = 7,
+    has_styling = 8,
+    graphemes_utf8 = 9,
 
     /// Output type expected for querying the data of the given kind.
     pub fn OutType(comptime self: RowCellsData) type {
@@ -476,7 +478,8 @@ pub const RowCellsData = enum(c_int) {
             .graphemes_len => u32,
             .graphemes_buf => u32,
             .bg_color, .fg_color => colorpkg.RGB.C,
-            .selected => bool,
+            .selected, .has_styling => bool,
+            .graphemes_utf8 => lib.Buffer,
         };
     }
 };
@@ -492,6 +495,7 @@ pub fn row_cells_get(
             return .invalid_value;
         };
     }
+    if (out == null) return .invalid_value;
 
     return switch (data) {
         .invalid => .invalid_value,
@@ -571,8 +575,42 @@ fn rowCellsGetTyped(
             x >= sel[0] and x <= sel[1]
         else
             false,
+        .has_styling => out.* = cell.hasStyling(),
+        .graphemes_utf8 => return rowCellsGetGraphemesUtf8(cell, if (cell.hasGrapheme()) cells.graphemes[x] else &.{}, out),
     }
 
+    return .success;
+}
+
+fn rowCellsGetGraphemesUtf8(
+    cell: page.Cell,
+    extra: []const u21,
+    out: *lib.Buffer,
+) Result {
+    out.len = 0;
+
+    if (!cell.hasText()) return .success;
+
+    var needed = std.unicode.utf8CodepointSequenceLength(cell.codepoint()) catch
+        return .invalid_value;
+    for (extra) |cp| {
+        needed += std.unicode.utf8CodepointSequenceLength(cp) catch
+            return .invalid_value;
+    }
+    out.len = needed;
+
+    if (out.ptr == null or out.cap < needed) return .out_of_space;
+
+    const buf = out.ptr.?[0..out.cap];
+    var i: usize = 0;
+    i += std.unicode.utf8Encode(cell.codepoint(), buf[i..]) catch
+        return .invalid_value;
+    for (extra) |cp| {
+        i += std.unicode.utf8Encode(cp, buf[i..]) catch
+            return .invalid_value;
+    }
+
+    out.len = i;
     return .success;
 }
 
@@ -1191,6 +1229,130 @@ test "render: row cells get selected" {
     try testing.expectEqual(Result.success, row_cells_get_multi(cells, keys.len, &keys, &values, &written));
     try testing.expectEqual(keys.len, written);
     try testing.expect(selected);
+}
+
+test "render: row cells get has_styling" {
+    var terminal: terminal_c.Terminal = null;
+    try testing.expectEqual(Result.success, terminal_c.new(
+        &lib.alloc.test_allocator,
+        &terminal,
+        .{
+            .cols = 10,
+            .rows = 3,
+            .max_scrollback = 10_000,
+        },
+    ));
+    defer terminal_c.free(terminal);
+
+    const input = "A\x1b[31mB";
+    terminal_c.vt_write(terminal, input, input.len);
+
+    var state: RenderState = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &state,
+    ));
+    defer free(state);
+
+    try testing.expectEqual(Result.success, update(state, terminal));
+
+    var it: RowIterator = null;
+    try testing.expectEqual(Result.success, row_iterator_new(
+        &lib.alloc.test_allocator,
+        &it,
+    ));
+    defer row_iterator_free(it);
+
+    var cells: RowCells = null;
+    try testing.expectEqual(Result.success, row_cells_new(
+        &lib.alloc.test_allocator,
+        &cells,
+    ));
+    defer row_cells_free(cells);
+
+    try testing.expectEqual(Result.success, get(state, .row_iterator, @ptrCast(&it)));
+    try testing.expect(row_iterator_next(it));
+    try testing.expectEqual(Result.success, row_get(it, .cells, @ptrCast(&cells)));
+
+    var has_styling = true;
+    try testing.expectEqual(Result.success, row_cells_select(cells, 0));
+    try testing.expectEqual(Result.success, row_cells_get(cells, .has_styling, @ptrCast(&has_styling)));
+    try testing.expect(!has_styling);
+
+    try testing.expectEqual(Result.success, row_cells_select(cells, 1));
+    try testing.expectEqual(Result.success, row_cells_get(cells, .has_styling, @ptrCast(&has_styling)));
+    try testing.expect(has_styling);
+
+    has_styling = false;
+    var written: usize = 0;
+    const keys = [_]RowCellsData{.has_styling};
+    var values = [_]?*anyopaque{@ptrCast(&has_styling)};
+    try testing.expectEqual(Result.success, row_cells_get_multi(cells, keys.len, &keys, &values, &written));
+    try testing.expectEqual(keys.len, written);
+    try testing.expect(has_styling);
+}
+
+test "render: row cells get graphemes utf8" {
+    var terminal: terminal_c.Terminal = null;
+    try testing.expectEqual(Result.success, terminal_c.new(
+        &lib.alloc.test_allocator,
+        &terminal,
+        .{ .cols = 10, .rows = 3, .max_scrollback = 10_000 },
+    ));
+    defer terminal_c.free(terminal);
+
+    const input = "e\u{301}";
+    terminal_c.vt_write(terminal, input, input.len);
+
+    var state: RenderState = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &state,
+    ));
+    defer free(state);
+
+    try testing.expectEqual(Result.success, update(state, terminal));
+
+    var it: RowIterator = null;
+    try testing.expectEqual(Result.success, row_iterator_new(
+        &lib.alloc.test_allocator,
+        &it,
+    ));
+    defer row_iterator_free(it);
+
+    var cells: RowCells = null;
+    try testing.expectEqual(Result.success, row_cells_new(
+        &lib.alloc.test_allocator,
+        &cells,
+    ));
+    defer row_cells_free(cells);
+
+    try testing.expectEqual(Result.success, get(state, .row_iterator, @ptrCast(&it)));
+    try testing.expect(row_iterator_next(it));
+    try testing.expectEqual(Result.success, row_get(it, .cells, @ptrCast(&cells)));
+
+    try testing.expectEqual(Result.success, row_cells_select(cells, 0));
+
+    var text: lib.Buffer = .{};
+    try testing.expectEqual(Result.out_of_space, row_cells_get(cells, .graphemes_utf8, @ptrCast(&text)));
+    try testing.expectEqual(@as(usize, input.len), text.len);
+
+    var small = [_]u8{ 'x', 'x' };
+    text = .{ .ptr = &small, .cap = small.len };
+    try testing.expectEqual(Result.out_of_space, row_cells_get(cells, .graphemes_utf8, @ptrCast(&text)));
+    try testing.expectEqual(@as(usize, input.len), text.len);
+    try testing.expectEqualSlices(u8, &.{ 'x', 'x' }, &small);
+
+    var buf: [8]u8 = undefined;
+    text = .{ .ptr = &buf, .cap = buf.len };
+    try testing.expectEqual(Result.success, row_cells_get(cells, .graphemes_utf8, @ptrCast(&text)));
+    try testing.expectEqual(input.len, text.len);
+    try testing.expectEqualStrings(input, buf[0..text.len]);
+
+    try testing.expectEqual(Result.success, row_cells_select(cells, 1));
+    text = .{ .ptr = &buf, .cap = buf.len };
+    try testing.expectEqual(Result.success, row_cells_get(cells, .graphemes_utf8, @ptrCast(&text)));
+    try testing.expectEqual(@as(usize, 0), text.len);
 }
 
 test "render: row iterator next" {
