@@ -59,7 +59,8 @@ pkg_check_modules(WAYLAND_CLIENT REQUIRED IMPORTED_TARGET wayland-client)
 # libEGL is needed by the OpenGL path's `EglDmabufTarget`, which uses
 # EGL_MESA_image_dma_buf_export to export an FBO-backed texture as a
 # dmabuf. With runtime renderer selection the OpenGL path is always
-# compiled, so EGL is now unconditionally REQUIRED (see line ~161). The
+# compiled, so EGL is now unconditionally REQUIRED (see the
+# `pkg_check_modules(EGL REQUIRED ...)` below). The
 # Vulkan path gets dmabufs straight from `VK_KHR_external_memory_fd` and
 # never calls into EGL.
 # libxkbcommon: derive the unshifted Unicode codepoint for a key event
