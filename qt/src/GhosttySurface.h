@@ -81,6 +81,25 @@ public:
   // Reassign the owning window (used when a tab is torn off into one).
   void setOwner(MainWindow *owner) { m_owner = owner; }
 
+  // Detach this pane's wl_subsurface and commit the parent top-level so
+  // the compositor stops compositing our last frame BEFORE the widget
+  // leaves its current top-level — whether for destruction (tab close,
+  // split collapse) or for a cross-window reparent (tab tear-off /
+  // adoption). The subsurface is in synchronized mode, so removing or
+  // destroying it does NOT clear its last buffer from the scene until
+  // the PARENT surface commits. On close, the dtor can't reach the
+  // parent (the widget is already reparented away); on reparent, the
+  // presenter is rebuilt against the NEW top-level on the next Show but
+  // the OLD top-level is never told to drop the stale subsurface. Either
+  // way a ghost of this pane's final frame (e.g. a mostly-transparent
+  // kitty image) lingers over whatever now occupies the region on the
+  // OLD top-level. Mirrors the QEvent::Hide detach path. MUST be called
+  // while the widget is still parented under the top-level being left
+  // (before removeTab / splitter collapse). On a reparent the latched
+  // m_hidden is cleared by the destination window's next Show. Null-safe
+  // and idempotent.
+  void detachFromTopLevel();
+
   // Show a dismissable "process exited" overlay over the terminal. The
   // surface stays open until the user dismisses it (key or click).
   void showChildExited(int exitCode);

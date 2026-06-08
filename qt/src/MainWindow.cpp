@@ -385,6 +385,14 @@ GhosttySurface *MainWindow::splitSurface(
 void MainWindow::removeSurface(GhosttySurface *surface) {
   if (!m_surfaces.removeOne(surface)) return;
 
+  // Detach this pane's subsurface and commit the parent top-level
+  // before any reparenting (splitter collapse or removeTab) moves the
+  // widget off its top-level. Otherwise the sync-mode subsurface's last
+  // frame can't be cleared from the compositor scene at destruction and
+  // ghosts over the surviving sibling / now-active tab (see
+  // GhosttySurface::detachFromTopLevel).
+  surface->detachFromTopLevel();
+
   // Drop stale split-zoom state if the zoomed surface is going away.
   if (surface == m_zoomed) {
     m_zoomed = nullptr;
@@ -449,6 +457,13 @@ void MainWindow::closeTab(int index) {
     undo::pushTab(m_tabs->tabText(index));
   const auto inTab = page->findChildren<GhosttySurface *>();
   for (GhosttySurface *s : inTab) m_surfaces.removeOne(s);
+  // Detach every pane's subsurface and commit the parent top-level
+  // while the page is still parented under this window — removeTab
+  // below reparents it away, after which the parent commit needed to
+  // clear the subsurface from the scene is unreachable (see
+  // GhosttySurface::detachFromTopLevel). Prevents a closed pane's last
+  // frame ghosting over the now-active tab.
+  for (GhosttySurface *s : inTab) s->detachFromTopLevel();
   // If the zoomed surface was in this tab, clear the stash so a later
   // toggleSplitZoom doesn't dereference a deleted page tree.
   if (m_zoomed && inTab.contains(m_zoomed)) {
@@ -551,6 +566,16 @@ void MainWindow::adoptTab(MainWindow *src, QWidget *page) {
     if (!m_surfaces.contains(s)) m_surfaces.append(s);
     s->setOwner(this);
   }
+
+  // Detach each surface's subsurface from the SOURCE top-level and commit
+  // it, before removeTab below reparents the page onto this window. The
+  // presenter is rebuilt against the new top-level on the next Show, but
+  // nothing otherwise tells the source window to drop the now-stale
+  // subsurface, so its last frame would ghost over whatever tab becomes
+  // active on the source. setOwner above only swapped the owner pointer;
+  // the widget is still parented under `src`, so window() still resolves
+  // to the source top-level here (see GhosttySurface::detachFromTopLevel).
+  for (GhosttySurface *s : adopted) s->detachFromTopLevel();
 
   const QString text = src->m_tabs->tabText(srcIndex);
   // QVariant carrying the typed TabData; copies cleanly across windows.

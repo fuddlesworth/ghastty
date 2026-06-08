@@ -2445,6 +2445,26 @@ bool GhosttySurface::forceParentCommit() {
   return true;
 }
 
+void GhosttySurface::detachFromTopLevel() {
+  // Gate the present path FIRST so a racing renderer-thread frame can't
+  // re-attach a buffer to the subsurface after we detach it below (same
+  // ordering as the QEvent::Hide handler). Latching m_hidden is harmless:
+  // on close the surface is going away; on a cross-window reparent the
+  // destination window's next QEvent::Show clears it (GhosttySurface
+  // ::event, Show branch) before the surface renders again.
+  m_hidden.store(true, std::memory_order_release);
+  if (!m_subsurfacePresenter) return;
+  // Null-attach the child + commit it, then commit the PARENT top-level
+  // so the removal actually lands in the compositor's scene (sync-mode
+  // subsurface state is parent-double-buffered). Without the parent
+  // commit the compositor keeps scanning out our last buffer until some
+  // unrelated parent paint fires — which, after we're destroyed, ghosts
+  // our final frame over the now-active tab/pane.
+  m_subsurfacePresenter->hide();
+  forceParentCommit();
+  m_subsurfacePresenter->flushDisplay();
+}
+
 // (Frame delivery to GhosttySurface is now via the
 // `vulkan::PresentSink` interface declared in `vulkan/Host.h`.
 // `vulkan::Host`'s present-callback trampoline calls
