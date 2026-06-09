@@ -344,6 +344,24 @@ void GhosttyApp::onWriteClipboard(void *ud, ghostty_clipboard_e loc,
       qApp,
       [text, mode]() { QGuiApplication::clipboard()->setText(text, mode); },
       Qt::QueuedConnection);
+
+  // In-window toast feedback, matching the GTK frontend's AdwToast on
+  // clipboard write. Only the standard clipboard toasts — the selection
+  // clipboard is rewritten on every text selection, so a toast there
+  // would be constant noise (GTK gates on `clipboard_type == .standard`
+  // too). Gated by app-notifications.clipboard-copy (bit 0); a bitfield
+  // read failure defaults both bits on, so the toast still appears.
+  if (loc == GHOSTTY_CLIPBOARD_STANDARD &&
+      (config::bitfield("app-notifications", 0x3) & 0x1)) {
+    const QString msg = text.isEmpty()
+                            ? QStringLiteral("Cleared clipboard")
+                            : QStringLiteral("Copied to clipboard");
+    MainWindow *win = surface->owner();
+    QPointer<MainWindow> winp(win);
+    QMetaObject::invokeMethod(
+        win, [winp, msg]() { if (winp) winp->showToast(msg); },
+        Qt::QueuedConnection);
+  }
 }
 
 void GhosttyApp::onCloseSurface(void *ud, bool) {

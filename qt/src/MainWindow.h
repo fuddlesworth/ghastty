@@ -15,6 +15,7 @@ class TabBar;
 class QTimer;
 class CommandPalette;
 class GhosttySurface;
+class Toast;
 
 // A top-level window presenting terminal surfaces as tabs; each tab may
 // be subdivided into splits. The libghostty app and config are shared
@@ -113,6 +114,13 @@ public:
   // Whether `focus-follows-mouse` is enabled — a GhosttySurface grabs
   // focus when the pointer enters it.
   bool focusFollowsMouse() const;
+
+  // Show a transient in-window toast (bottom-centered, ~3s) — the Qt
+  // analogue of the GTK frontend's AdwToast. Used for lightweight
+  // feedback like "Copied to clipboard". The toast is created lazily on
+  // first use. Gating (app-notifications.*) is the caller's job, matching
+  // GTK where each toast site checks its own config bit.
+  void showToast(const QString &text);
 
   // Live surface list owned by this window. Read by GhosttyApp::frame
   // to walk every surface for renderIfDirty without exposing the
@@ -281,4 +289,8 @@ private:
 
   // The command palette; created lazily on first use.
   CommandPalette *m_commandPalette = nullptr;
+
+  // Transient in-window toast (e.g. "Copied to clipboard"); created
+  // lazily on first showToast call. See qt/src/Toast.h.
+  Toast *m_toast = nullptr;
 };

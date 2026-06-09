@@ -150,7 +150,7 @@ should not be appended here — open them as new work instead.
 - [x] **C18.** `progress-style` — fixed in `13d4353b1` (`no`/`none` suppresses the taskbar entry).
 - [x] **C19.** `split-preserve-zoom` — fixed in `8bd64d0fa` (`navigation` bit re-zooms destination on goto-split).
 - [x] **C20.** `initial-window` — fixed in `6d700c36b`
-- [x] **C21.** `app-notifications` (per-category gating) — fixed in `8bd64d0fa`. `config-reload` bit gates a freshly added "Configuration reloaded" toast on every reloadConfigGlobal. `clipboard-copy` bit is read for forward-compat — Qt doesn't currently post a copy toast, so the gate is trivially honored, but a future copy notification will pick this site up without code changes.
+- [x] **C21.** `app-notifications` (per-category gating) — full in-window toast parity with GTK via the new `Toast` widget (`qt/src/Toast.{h,cpp}`), the Qt analogue of libadwaita's `AdwToast` (rounded bottom-centered pill, ~3s, fades in/out, never grabs focus; floats over the terminal subsurface like the existing exit/keyseq overlays). All three GTK toast strings are now reproduced verbatim: `clipboard-copy` bit gates "Copied to clipboard" / "Cleared clipboard" in `GhosttyApp::onWriteClipboard` (standard clipboard only — the selection clipboard would toast on every drag, matching GTK's `.standard`-only gate); `config-reload` bit gates "Reloaded the configuration" toasted on every open window from `reloadConfigGlobal` (replaced the earlier desktop notification — GTK uses a toast, not a D-Bus notification). This is GTK's complete `addToast` surface (verified: only those 3 strings exist; bell/command-finished/child-exited use desktop notifications or in-surface banners, not toasts).
 
 ---
 
