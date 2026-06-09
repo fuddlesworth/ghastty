@@ -198,6 +198,7 @@ add_executable(ghastty
   src/quickterm/QuickTerminal.cpp
   src/SearchBar.cpp
   src/TabWidget.cpp
+  src/Toast.cpp
   src/undo/UndoStack.cpp
   src/Util.cpp
   src/wayland/AlphaModifier.cpp

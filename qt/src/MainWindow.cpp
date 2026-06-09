@@ -50,6 +50,7 @@
 #include "GhosttySurface.h"
 #include "quickterm/QuickTerminal.h"
 #include "TabWidget.h"
+#include "Toast.h"
 #include "undo/UndoStack.h"
 #include "Util.h"
 #include "WindowBlur.h"
@@ -1239,26 +1240,34 @@ void MainWindow::reloadConfigGlobal() {
 
   refreshChrome();
 
-  // app-notifications.config-reload: post a desktop notification so
-  // the user has a visible cue that the reload landed.
+  // app-notifications.config-reload: show an in-window toast so the user
+  // has a visible cue that the reload landed — matching the GTK frontend,
+  // which posts an AdwToast ("Reloaded the configuration") rather than a
+  // desktop notification.
   //
   // AppNotifications = packed struct { clipboard-copy: bool = true,
-  // config-reload: bool = true }. libghostty serializes packed
-  // structs as c_uint (see c_get.zig). Bit 0 = clipboard-copy,
-  // bit 1 = config-reload. The clipboard-copy bit is read for
-  // forward compatibility — Qt doesn't currently post a copy
-  // toast, but a future one will pick up the same gate.
-  // config::bitfield failure → defaults (both bits set) so the
-  // feature still works as documented.
+  // config-reload: bool = true }. libghostty serializes packed structs as
+  // c_uint (see c_get.zig). Bit 0 = clipboard-copy, bit 1 = config-reload.
+  // config::bitfield failure → defaults (both bits set) so the feature
+  // still works as documented.
+  //
+  // reloadConfigGlobal is app-scoped, so toast every open window (GTK's
+  // reload is per-window; each window shows its own toast).
   const unsigned int notifBits = config::bitfield("app-notifications", 0x3);
   const bool wantConfigReload = (notifBits & 0x2) != 0;
-  if (wantConfigReload)
-    postNotification(QStringLiteral("Ghostty"),
-                     QStringLiteral("Configuration reloaded."));
+  if (wantConfigReload) {
+    for (MainWindow *w : GhosttyApp::instance().windows())
+      w->showToast(QStringLiteral("Reloaded the configuration"));
+  }
 }
 
 bool MainWindow::focusFollowsMouse() const {
   return config::boolean("focus-follows-mouse", false);
+}
+
+void MainWindow::showToast(const QString &text) {
+  if (!m_toast) m_toast = new Toast(this);
+  m_toast->post(text);
 }
 
 // Bring this window forward and focus the surface inside it. Mirrors
