@@ -214,6 +214,10 @@ bool MainWindow::initialize() {
   // Tab-bar policy and colour scheme.
   applyWindowConfig();
 
+  // Back the still-surfaceless window with the terminal background colour
+  // so the deferred-first-surface gap doesn't flash the Qt palette colour.
+  refreshBackdrop();
+
   // Process-wide 60fps frame timer + libghostty wakeup coalescing
   // both live on GhosttyApp now.
   GhosttyApp::instance().ensureFrameTimer();
@@ -340,6 +344,10 @@ GhosttySurface *MainWindow::newTab(ghostty_surface_t parent) {
     index = m_tabs->addTab(page, QStringLiteral("Ghastty"));
   m_tabs->setCurrentIndex(index);
   surface->setFocus();
+  // The window now has a surface covering the content — restore the themed
+  // tab-widget colour (the bg-colour backdrop was only for the pre-surface
+  // gap; see refreshBackdrop).
+  refreshBackdrop();
   return surface;
 }
 
@@ -585,6 +593,9 @@ void MainWindow::adoptTab(MainWindow *src, QWidget *page) {
   const int index = m_tabs->addTab(page, text);  // reparents page here
   m_tabs->tabBar()->setTabData(index, data);
   m_tabs->setCurrentIndex(index);
+  // A torn-off window receives its first surface here (not via newTab), so
+  // restore its themed backdrop now that it's no longer surfaceless.
+  refreshBackdrop();
 
   if (src->m_tabs->count() == 0) {
     src->m_skipCloseConfirm = true;
@@ -1268,6 +1279,32 @@ bool MainWindow::focusFollowsMouse() const {
 void MainWindow::showToast(const QString &text) {
   if (!m_toast) m_toast = new Toast(this);
   m_toast->post(text);
+}
+
+void MainWindow::refreshBackdrop() {
+  // The first terminal surface is created lazily — deferred until the
+  // device pixel ratio settles (see showEvent), up to ~250ms after the
+  // window maps. During that gap there is no surface, so the empty tab
+  // widget (autoFillBackground) paints its palette Window colour. On a
+  // light Qt theme that's a white flash before the terminal's background
+  // appears — jarring against a coloured background, and more visible on
+  // slower GPUs where the first frame lands later. While the window has
+  // no surface, back it with the terminal's configured `background`
+  // colour so it comes up already matching the terminal; once a surface
+  // exists (it covers the content) restore the themed colour so the tab
+  // bar keeps its palette contrast.
+  QColor c;
+  if (m_surfaces.isEmpty()) {
+    ghostty_config_color_s bg{};
+    c = config::get(&bg, "background") ? QColor(bg.r, bg.g, bg.b)
+                                       : QColor(0, 0, 0);
+  } else {
+    c = QApplication::palette().color(QPalette::Window);
+  }
+  QPalette pal = m_tabs->palette();
+  if (pal.color(QPalette::Window) == c) return;  // no-op if unchanged
+  pal.setColor(QPalette::Window, c);
+  m_tabs->setPalette(pal);
 }
 
 // Bring this window forward and focus the surface inside it. Mirrors

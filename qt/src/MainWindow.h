@@ -243,6 +243,13 @@ private:
   // compositor (see WindowBlur).
   void applyBlur();
 
+  // Back the window with the terminal's configured `background` colour
+  // while it has no surface yet (the first surface is created lazily —
+  // see showEvent), then restore the themed colour once a surface exists.
+  // Prevents a light-theme white flash before the terminal background
+  // appears on window/tab open.
+  void refreshBackdrop();
+
   TabWidget *m_tabs = nullptr;
   QList<GhosttySurface *> m_surfaces;  // every live surface in this window
   bool m_firstTabPending = true;       // first tab is created on show()
