@@ -103,8 +103,17 @@ pub const custom_shader_target: shadertoy.Target = .spv;
 /// `frame.target` instead.
 pub const supports_custom_shaders: bool = true;
 
-/// Vulkan's clip-space Y axis points down (unlike OpenGL).
-pub const custom_shader_y_is_down = true;
+/// The Y convention of the `iCurrentCursor`/`iPreviousCursor` uniforms, which
+/// must match what the custom shader actually SEES. Although Vulkan's native
+/// framebuffer/clip-space Y points down, the custom-shader prefix
+/// (`shadertoy_prefix.glsl`, under `GHASTTY_VULKAN`) flips both `fragCoord`
+/// (`iResolution.y - gl_FragCoord.y`) and `iChannel0` sampling back to the
+/// Shadertoy lower-left (Y-up) convention so author shaders stay portable with
+/// OpenGL. The cursor uniforms therefore have to be Y-up too — same as OpenGL —
+/// NOT Vulkan-native Y-down. Leaving this `true` left the cursor uniforms Y-down
+/// while `fragCoord`/`iChannel0` were Y-up, rendering cursor effects at the
+/// vertically-mirrored position.
+pub const custom_shader_y_is_down = false;
 
 /// Extra `#define` lines `shadertoy.loadFromFile` injects into the
 /// prefix between `#version` and the rest. `GHASTTY_VULKAN`
