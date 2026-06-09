@@ -43,6 +43,9 @@
 #include <QVariant>
 #include <QVBoxLayout>
 
+#include <qpa/qplatformnativeinterface.h>
+#include <wayland-client.h>
+
 #include "app/GhosttyApp.h"
 #include "bell/BellPlayer.h"
 #include "config/Config.h"
@@ -54,6 +57,19 @@
 #include "undo/UndoStack.h"
 #include "Util.h"
 #include "WindowBlur.h"
+
+namespace {
+// The process wl_display from Qt's platform integration, or null off
+// Wayland. Mirrors wayland::acquireWaylandDisplay (file-local there).
+wl_display *waylandDisplay() {
+  if (!QGuiApplication::platformName().startsWith(QLatin1String("wayland")))
+    return nullptr;
+  QPlatformNativeInterface *ni = QGuiApplication::platformNativeInterface();
+  return ni ? static_cast<wl_display *>(
+                  ni->nativeResourceForIntegration("wl_display"))
+            : nullptr;
+}
+}  // namespace
 
 // Small accent-coloured dot icon shown in a tab while the tab has an
 // unacknowledged bell (bell-features title). Replaces the prior
@@ -292,15 +308,48 @@ MainWindow *MainWindow::newWindow(ghostty_surface_t parent) {
 void MainWindow::showEvent(QShowEvent *event) {
   QWidget::showEvent(event);
 
-  // Defer the first terminal until the device pixel ratio has settled.
-  // On Wayland the fractional scale arrives asynchronously after the
-  // window appears; a surface created before then spawns its shell at a
-  // stale scale, so a shell greeting (fastfetch) queries a wrong cell
-  // size and mis-sizes Kitty images. event() creates the tab as soon as
-  // a DevicePixelRatioChange lands; this timer is the fallback for when
-  // the ratio was already correct at show.
-  if (m_firstTabPending)
-    QTimer::singleShot(250, this, [this] { createFirstTab(); });
+  // Create the first terminal — and so fork its shell — as soon as the
+  // device pixel ratio is known-final, because the shell + PTY are forked
+  // at that scale (GhosttySurface ctor) and a shell greeting (fastfetch)
+  // bakes its Kitty image to the cell pixel size it sees at startup.
+  //
+  // On a *fractionally* scaled Wayland output the compositor first
+  // advertises the integer wl_output.scale (the ceil — e.g. 2 for a 1.2
+  // output) and only sends the real fractional scale via
+  // wp_fractional_scale_v1 once the surface is committed, a few ms later;
+  // forking at the stale integer scale mis-sizes that first frame. event()
+  // creates the tab the instant that correction lands as a
+  // DevicePixelRatioChange.
+  //
+  // But any fractional scale > 1 ceils to >= 2, so a value of exactly 1.0
+  // here can ONLY be a true 100% output — no correction will ever come and
+  // the scale is already final. Fork the shell immediately rather than
+  // blocking it behind a wait for a change that never arrives (the
+  // regression a non-fractional user saw vs upstream ghostty).
+  //
+  // Otherwise (fractional, or an integer >1 we can't yet tell apart from a
+  // pending fractional correction) resolve the scale DETERMINISTICALLY
+  // instead of waiting a fixed timeout. The real scale is only negotiated
+  // after Qt commits the window surface and the compositor replies; by the
+  // next event-loop turn Qt has issued that commit, so a wl_display
+  // roundtrip flushes it and processes the reply — the DPR is final (the
+  // fractional value applied, or a true integer confirmed) by the time we
+  // fork, in ~one frame with no race. The roundtrip runs from a singleShot
+  // (top of an event-loop turn, not nested in event delivery) so it's not
+  // re-entrant. event()'s DevicePixelRatioChange may still fork even
+  // earlier when a fractional correction lands first (the guard below makes
+  // the later roundtrip path a no-op then).
+  if (m_firstTabPending) {
+    if (devicePixelRatioF() <= 1.0) {
+      createFirstTab();
+    } else {
+      QTimer::singleShot(0, this, [this] {
+        if (!m_firstTabPending) return;
+        if (wl_display *dpy = waylandDisplay()) wl_display_roundtrip(dpy);
+        createFirstTab();
+      });
+    }
+  }
 
   // Apply background blur once the native Wayland surface exists; a
   // zero-delay timer defers past the platform-window creation.
