@@ -31,11 +31,32 @@ bool boolean(const char *key, bool fallback) {
   return value;
 }
 
-QString diskValue(const char *key) {
+QString userConfigPath() {
   QString dir = qEnvironmentVariable("XDG_CONFIG_HOME");
   if (dir.isEmpty()) dir = QDir::homePath() + QStringLiteral("/.config");
+  const QString own = dir + QStringLiteral("/ghastty/config");
+  if (QFile::exists(own)) return own;
+  // Backward-compatible fallback: keep reading ghostty's config when
+  // the user hasn't created a ghastty-specific one.
+  return dir + QStringLiteral("/ghostty/config");
+}
 
-  QFile f(dir + QStringLiteral("/ghostty/config"));
+void loadUserFiles(ghostty_config_t cfg) {
+  const QString path = userConfigPath();
+  // If our own config file exists, load it explicitly so ghastty uses
+  // ghastty/config instead of ghostty/config. Otherwise fall back to
+  // libghostty's default-file search (which also handles ghostty's
+  // other default locations).
+  if (path.endsWith(QStringLiteral("/ghastty/config"))) {
+    const QByteArray utf8 = path.toUtf8();
+    ghostty_config_load_file(cfg, utf8.constData());
+  } else {
+    ghostty_config_load_default_files(cfg);
+  }
+}
+
+QString diskValue(const char *key) {
+  QFile f(userConfigPath());
   if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return {};
 
   const QByteArray wanted(key);

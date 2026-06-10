@@ -51,9 +51,11 @@ GhosttyApp::~GhosttyApp() {
 bool GhosttyApp::ensureInitialized() {
   if (m_app) return true;
 
-  // Load configuration in the same order as the reference apprt.
+  // Load configuration in the same order as the reference apprt, but
+  // prefer ghastty's own config file (~/.config/ghastty/config) over
+  // ghostty's via config::loadUserFiles.
   m_config = ghostty_config_new();
-  ghostty_config_load_default_files(m_config);
+  config::loadUserFiles(m_config);
   ghostty_config_load_cli_args(m_config);
   ghostty_config_load_recursive_files(m_config);
   ghostty_config_finalize(m_config);
