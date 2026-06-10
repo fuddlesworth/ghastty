@@ -1281,9 +1281,10 @@ void MainWindow::reloadConfig() { reloadConfigGlobal(); }
 
 void MainWindow::reloadConfigGlobal() {
   if (!GhosttyApp::instance().app()) return;
-  // Re-read the config from disk in the same order as initialize().
+  // Re-read the config from disk in the same order as initialize()
+  // (config::loadUserFiles prefers ghastty/config over ghostty/config).
   ghostty_config_t config = ghostty_config_new();
-  ghostty_config_load_default_files(config);
+  config::loadUserFiles(config);
   ghostty_config_load_cli_args(config);
   ghostty_config_load_recursive_files(config);
   ghostty_config_finalize(config);

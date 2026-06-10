@@ -17,6 +17,21 @@
 // a function-call hop on each config read.
 namespace config {
 
+// Absolute path to the active on-disk config file. Prefers ghastty's
+// own namespace (`$XDG_CONFIG_HOME/ghastty/config`, default
+// `~/.config/ghastty/config`) and falls back to ghostty's
+// (`.../ghostty/config`) when the former doesn't exist, so existing
+// ghostty users keep working. This is the file diskValue() scans and
+// the one loadUserFiles() feeds to libghostty.
+[[nodiscard]] QString userConfigPath();
+
+// Load the user's on-disk config into `cfg`, preferring ghastty's own
+// config file (see userConfigPath) and otherwise deferring to
+// libghostty's default-file search. Call this in place of
+// ghostty_config_load_default_files at every config-build site so
+// initial load and reload agree on which file wins.
+void loadUserFiles(ghostty_config_t cfg);
+
 // The live ghostty_config_t. Returns nullptr before the singleton has
 // finished ensureInitialized — callers that read config during early
 // startup (before the first MainWindow::initialize) must check.
