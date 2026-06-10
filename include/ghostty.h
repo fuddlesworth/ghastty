@@ -361,6 +361,14 @@ typedef struct {
   const char* text;
   uint32_t unshifted_codepoint;
   bool composing;
+  // The layout-mapped (and possibly OS-remapped) key, resolved by the
+  // apprt from the event's keysym. Linux/BSD apprts running under XKB
+  // should set this so user remaps like `caps:swapescape` are honored
+  // (libghostty's keycode->key table is otherwise blind to them). Leave
+  // it GHOSTTY_KEY_UNIDENTIFIED (0) to fall back to keycode-only
+  // resolution; the core arbitrates per Key.shouldBeRemappable so
+  // physical writing-system keys keep their layout-independent identity.
+  ghostty_input_key_e key;
 } ghostty_input_key_s;
 
 typedef enum {

@@ -37,6 +37,16 @@ public:
   // user gets the correct codepoint per active group, not always us.
   uint32_t unshiftedCodepoint(uint32_t keycode) const;
 
+  // Resolve a hardware keycode to the layout-mapped ghostty key,
+  // honoring compositor-level xkb remaps (e.g. KDE's Caps Lock ->
+  // Escape). Looks up the key's base keysym in the live keymap and
+  // maps it to the ghostty key enum (mirroring the GTK apprt's
+  // keyFromKeyval table). Returned as ghostty_input_key_s.key; the
+  // core arbitrates it against the physical keycode via
+  // Key.shouldBeRemappable, so writing-system keys keep their
+  // layout-independent identity. GHOSTTY_KEY_UNIDENTIFIED if unknown.
+  ghostty_input_key_e keyForKeycode(uint32_t keycode) const;
+
   // Side bits for the libghostty mods bitfield, derived from a
   // keycode — pressing Right-Shift sets BOTH the unsided
   // GHOSTTY_MODS_SHIFT and GHOSTTY_MODS_SHIFT_RIGHT bit (a left-side

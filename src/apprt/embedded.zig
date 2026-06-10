@@ -100,6 +100,10 @@ pub const App = struct {
         text: ?[:0]const u8,
         unshifted_codepoint: u32,
         composing: bool,
+        /// The apprt-resolved key from the event's keysym (layout-mapped,
+        /// possibly OS-remapped), or `.unidentified` when the apprt only
+        /// supplied a hardware keycode. See `core` for how this is used.
+        mapped_key: input.Key = .unidentified,
 
         /// Convert a libghostty key event into a core key event.
         fn core(self: KeyEvent) ?input.KeyEvent {
@@ -109,10 +113,25 @@ pub const App = struct {
                 self.unshifted_codepoint,
             ) orelse 0;
 
-            // We want to get the physical unmapped key to process keybinds.
-            const physical_key = keycode: for (input.keycodes.entries) |entry| {
+            // The physical key from the hardware keycode (layout-agnostic).
+            const w3c_key: input.Key = keycode: for (input.keycodes.entries) |entry| {
                 if (entry.native == self.keycode) break :keycode entry.key;
             } else .unidentified;
+
+            // If the apprt resolved a key from the keysym (e.g. an XKB
+            // user-remap like caps:swapescape), honor it for keys that
+            // should be remappable — but keep the physical key for
+            // writing-system keys so layout-independent binds (ctrl+c on
+            // any layout) survive. This mirrors the GTK apprt's logic.
+            const physical_key: input.Key = physical: {
+                if (self.mapped_key != .unidentified and
+                    (w3c_key.shouldBeRemappable() or
+                        self.mapped_key.shouldBeRemappable()))
+                {
+                    break :physical self.mapped_key;
+                }
+                break :physical w3c_key;
+            };
 
             // Build our final key event
             return .{
@@ -1509,6 +1528,11 @@ pub const CAPI = struct {
         text: ?[*:0]const u8,
         unshifted_codepoint: u32,
         composing: bool,
+        // The apprt-resolved (keysym-mapped, possibly OS-remapped) key.
+        // `.unidentified` means the apprt only has a hardware keycode and
+        // wants the core to resolve the key from `keycode` alone. See
+        // App.KeyEvent.core for how this arbitrates with the physical key.
+        key: input.Key,
 
         /// Convert to Zig key event.
         fn keyEvent(self: KeyEvent) App.KeyEvent {
@@ -1526,6 +1550,7 @@ pub const CAPI = struct {
                 .text = if (self.text) |ptr| std.mem.sliceTo(ptr, 0) else null,
                 .unshifted_codepoint = self.unshifted_codepoint,
                 .composing = self.composing,
+                .mapped_key = self.key,
             };
         }
     };

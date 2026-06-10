@@ -1478,8 +1478,20 @@ void GhosttySurface::sendKey(QKeyEvent *ev, ghostty_input_action_e action) {
       static_cast<unsigned char>(text.front()) != 0x7f;
 
   // The Wayland plugin reports the XKB keycode via nativeScanCode(),
-  // which is libghostty's Linux-native input format.
+  // which is libghostty's Linux-native input format. The XKB lookups
+  // below (text, unshifted codepoint, sided/consumed mods) all key off
+  // this physical keycode.
   const uint32_t keycode = ev->nativeScanCode();
+
+  // libghostty derives the physical key from the hardware keycode via a
+  // static table that is blind to compositor-level xkb remaps (e.g.
+  // KDE's Caps Lock -> Escape). Resolve the layout-mapped key from the
+  // live keymap and hand it to the core via the `key` field; the core
+  // arbitrates it against the physical keycode (Key.shouldBeRemappable),
+  // exactly like the GTK apprt. The keycode itself stays the true
+  // physical key so layout-independent binds still work.
+  const ghostty_input_key_e mappedKey =
+      XkbState::instance().keyForKeycode(keycode);
 
   // OR in any right-side bit for this keycode (e.g. Right-Shift sets
   // SHIFT_RIGHT alongside SHIFT) and the live Caps/Num lock state
@@ -1510,6 +1522,7 @@ void GhosttySurface::sendKey(QKeyEvent *ev, ghostty_input_action_e action) {
       .text = printable ? text.constData() : nullptr,
       .unshifted_codepoint = XkbState::instance().unshiftedCodepoint(keycode),
       .composing = false,
+      .key = mappedKey,
   };
   ghostty_surface_key(m_surface, k);
 }
@@ -1829,18 +1842,24 @@ void GhosttySurface::wheelEvent(QWheelEvent *ev) {
   //
   // Trackpads and high-resolution mice fill in pixelDelta; classic
   // notched wheels only fill angleDelta (120 units per notch). When
-  // pixelDelta is present we feed that, divide by an approximate cell
-  // height (we don't have it from libghostty here, so use 16 logical
-  // pixels — close enough for smooth-scroll feel) and flag the event
-  // as precision so kitty's smooth-scroll engages. Otherwise we fall
-  // back to the classic "120 units == one notch" path.
+  // pixelDelta is present we feed it through as raw pixels and flag
+  // the event as precision so kitty's smooth-scroll engages.
+  //
+  // IMPORTANT: libghostty's precision path expects the delta in
+  // PIXELS — it accumulates it against the cell height internally
+  // (Surface.zig: `poff / cell_size`). An earlier version pre-divided
+  // pixelDelta by an approximate 16px cell here, which double-converted
+  // and made trackpad scrolling ~16x too weak (it looked like scrolling
+  // was broken entirely). Qt reports pixelDelta in logical pixels, so
+  // scale by the device pixel ratio to match libghostty's physical
+  // cell size.
   double dx = 0.0, dy = 0.0;
   int mods = 0;
   const QPoint pd = ev->pixelDelta();
   if (!pd.isNull()) {
-    constexpr double kCellPx = 16.0;
-    dx = pd.x() / kCellPx;
-    dy = pd.y() / kCellPx;
+    const double scale = devicePixelRatioF();
+    dx = pd.x() * scale;
+    dy = pd.y() * scale;
     mods |= 1;  // ScrollMods.precision
   } else {
     const QPoint a = ev->angleDelta();
