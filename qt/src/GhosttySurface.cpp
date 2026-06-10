@@ -1852,12 +1852,18 @@ void GhosttySurface::wheelEvent(QWheelEvent *ev) {
   // and made trackpad scrolling ~16x too weak (it looked like scrolling
   // was broken entirely). Qt reports pixelDelta in logical pixels, so
   // scale by the device pixel ratio to match libghostty's physical
-  // cell size.
+  // cell size, then by the same precision multiplier the GTK apprt
+  // applies (src/apprt/gtk/class/surface.zig: `multiplier = 10.0`) so
+  // touchpad scrolling has parity with GTK instead of feeling ~10x
+  // slower. libghostty's own `mouse-scroll-multiplier.precision`
+  // (default 1.0) is applied on top of this inside the core, exactly
+  // as it is for GTK.
+  constexpr double kPrecisionScrollMultiplier = 10.0;
   double dx = 0.0, dy = 0.0;
   int mods = 0;
   const QPoint pd = ev->pixelDelta();
   if (!pd.isNull()) {
-    const double scale = devicePixelRatioF();
+    const double scale = devicePixelRatioF() * kPrecisionScrollMultiplier;
     dx = pd.x() * scale;
     dy = pd.y() * scale;
     mods |= 1;  // ScrollMods.precision
