@@ -1,94 +1,86 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- V2: Original dome ghost + 4 wavy feet, on the purple CRT bezel.
-     Scaled up ~1.5x vs V1 so the ghost actually fills the screen
-     rectangle instead of floating in empty space. Eye/mouth ratios
-     preserved; the >_ prompt cue and the small mouth still read
-     correctly at small sizes (16px favicon range). -->
+<!-- V5: Standalone tall ghost, no CRT bezel — matched to upstream
+     Ghostty's ghost-only icon while keeping ghastty's own identity:
+     cream body, red `>_` prompt eyes + mouth, wavy feet, red face glow.
+
+     Feet: rounded toes with crisp cusp valleys. Each toe is one cubic
+     with vertical control handles (controls straight below the two
+     valley endpoints), so the valleys stay pointed AND the end toes meet
+     the side walls with a vertical tangent — the bottom corners round
+     off instead of kinking like the old Q-scallops did. (An earlier
+     smooth-wave version rounded the valleys too and read as a sine wave.)
+
+     Face is not flat: glyphs use a top-lit red gradient with a subtle
+     emboss shadow, the cursor block is rounded, and the mouth is a
+     rounded pill rather than a plain square.
+
+     Proportions matched to upstream's solid body (319x387, h/w 1.213,
+     ~71.5% of canvas height): body 604 wide x 732 tall, centered at
+     x=512, dome apex y=121, feet bottom y=853. Dark outline + soft outer
+     glow keep it legible on light desktop panels (no bezel to frame it). -->
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024"
      viewBox="0 0 1024 1024">
   <defs>
-    <linearGradient id="bezel" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#3a2c5e"/>
-      <stop offset="0.5" stop-color="#1c1430"/>
-      <stop offset="1" stop-color="#08060f"/>
-    </linearGradient>
-    <linearGradient id="bezelSheen" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#7d6cb0" stop-opacity="0.4"/>
-      <stop offset="0.15" stop-color="#7d6cb0" stop-opacity="0"/>
-    </linearGradient>
-    <radialGradient id="screen" cx="0.5" cy="0.35" r="0.85">
-      <stop offset="0" stop-color="#221d52"/>
-      <stop offset="0.6" stop-color="#0f0c2a"/>
-      <stop offset="1" stop-color="#040312"/>
-    </radialGradient>
-    <radialGradient id="screenBloom" cx="0.5" cy="0.3" r="0.55">
-      <stop offset="0" stop-color="#8a4ad8" stop-opacity="0.30"/>
-      <stop offset="1" stop-color="#8a4ad8" stop-opacity="0"/>
-    </radialGradient>
-    <linearGradient id="screenGloss" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#ffffff" stop-opacity="0.10"/>
-      <stop offset="0.45" stop-color="#ffffff" stop-opacity="0"/>
-    </linearGradient>
     <linearGradient id="ghostBody" gradientUnits="userSpaceOnUse"
-                    x1="512" y1="175" x2="512" y2="850">
+                    x1="512" y1="121" x2="512" y2="853">
       <stop offset="0" stop-color="#f4f1ea"/>
       <stop offset="0.55" stop-color="#e3ddd0"/>
       <stop offset="1" stop-color="#a89fa8"/>
     </linearGradient>
+    <!-- Top-lit red for the glyphs so they read as raised, not flat. -->
+    <linearGradient id="promptRed" gradientUnits="userSpaceOnUse"
+                    x1="512" y1="440" x2="512" y2="690">
+      <stop offset="0" stop-color="#ff5a45"/>
+      <stop offset="1" stop-color="#d11f1f"/>
+    </linearGradient>
+    <!-- Red face glow: warm bloom behind the prompt and the mouth. -->
     <radialGradient id="mouthGlow" cx="0.5" cy="0.5" r="0.5">
-      <stop offset="0" stop-color="#ff4838" stop-opacity="0.55"/>
+      <stop offset="0" stop-color="#ff4838" stop-opacity="0.50"/>
       <stop offset="1" stop-color="#ff4838" stop-opacity="0"/>
     </radialGradient>
+    <!-- Soft outer glow so the pale ghost separates from light backgrounds. -->
+    <filter id="outerGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="0" stdDeviation="14"
+                    flood-color="#0a0c14" flood-opacity="0.35"/>
+    </filter>
   </defs>
-  <rect x="0" y="0" width="1024" height="1024" rx="200" fill="url(#bezel)"/>
-  <rect x="0" y="0" width="1024" height="1024" rx="200" fill="url(#bezelSheen)"/>
-  <rect x="88" y="88" width="848" height="848" rx="120" fill="url(#screen)"/>
-  <rect x="88" y="88" width="848" height="848" rx="120" fill="url(#screenBloom)"/>
-  <rect x="88" y="88" width="848" height="848" rx="120" fill="url(#screenGloss)"/>
 
-  <!-- Dome ghost: rounded top (radius 285) + straight sides + 4 wavy
-       feet at bottom. 1.5x scale of V1; same anchor at x=512 but the
-       body now spans x=227..797 and y=175..850 inside the 88..936
-       screen rectangle. -->
-  <path d="
-    M 227 757
-    L 227 460
-    A 285 285 0 0 1 797 460
-    L 797 757
-    Q 726 850 654 757
-    Q 583 850 512 757
-    Q 441 850 370 757
-    Q 298 850 227 757 Z
-  " fill="url(#ghostBody)"/>
-  <path d="
-    M 227 757
-    L 227 460
-    A 285 285 0 0 1 797 460
-    L 797 757
-    Q 726 850 654 757
-    Q 583 850 512 757
-    Q 441 850 370 757
-    Q 298 850 227 757 Z
-  " fill="none" stroke="#0a0c14" stroke-opacity="0.55"
-        stroke-width="14" stroke-linejoin="round"/>
+  <!-- Dome ghost: rounded top (radius 302) + straight sides + a smooth
+       4-toe wave at the bottom. Centered on x=512; body x=210..814,
+       y=121..853. The bottom wave's end segments leave the walls with a
+       vertical tangent (controls at x=814 / x=210), rounding the corners. -->
+  <g filter="url(#outerGlow)">
+    <path id="bodyPath" d="
+      M 210 783
+      L 210 423
+      A 302 302 0 0 1 814 423
+      L 814 783
+      C 814 848 663 848 663 783
+      C 663 848 512 848 512 783
+      C 512 848 361 848 361 783
+      C 361 848 210 848 210 783 Z
+    " fill="url(#ghostBody)"/>
+    <use href="#bodyPath" fill="none" stroke="#0a0c14" stroke-opacity="0.55"
+         stroke-width="15" stroke-linejoin="round"/>
+  </g>
 
-  <!-- > _ prompt eyes, centered on ghost x=512. Pair geometry
-       (1.5x V1):
-         chevron: x=338..437 (apex at 437), 99 wide
-         gap:     102
-         cursor:  x=539..686, 147 wide
-         total:   338..686, midpoint 512 ✓
-       Vertical center y=514. -->
-  <ellipse cx="512" cy="514" rx="300" ry="120" fill="url(#mouthGlow)"/>
-  <path d="M 338 457 L 437 514 L 338 571"
-        fill="none" stroke="#e63232" stroke-width="42"
-        stroke-linecap="round" stroke-linejoin="round"/>
-  <rect x="539" y="487" width="147" height="54" rx="9" fill="#e63232"/>
+  <!-- Red face glow, within the body. -->
+  <ellipse cx="512" cy="488" rx="250" ry="115" fill="url(#mouthGlow)"/>
+  <ellipse cx="512" cy="651" rx="85" ry="50" fill="url(#mouthGlow)"/>
 
-  <!-- Small mouth: sits below the eyes, above the foot trough.
-       Straight-body region ends at y=757 where the feet begin;
-       placing the mouth at y=640..688 keeps it on the body proper,
-       not in the foot scallops. -->
-  <ellipse cx="512" cy="664" rx="84" ry="48" fill="url(#mouthGlow)"/>
-  <rect x="482" y="640" width="60" height="48" rx="6" fill="#e63232"/>
+  <!-- Emboss: darker copies offset down a few px so the glyphs get a
+       raised lip (light from above). -->
+  <g fill="#8f1414" stroke="#8f1414" opacity="0.5">
+    <path d="M 328 431 L 432 493 L 328 555" fill="none" stroke-width="45"
+          stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="541" y="464" width="155" height="59" rx="20"/>
+    <rect x="477" y="636" width="70" height="40" rx="20"/>
+  </g>
+
+  <!-- > _ prompt eyes (chevron x=328..432 apex 432, cursor x=541..696,
+       vertical center y=488) and a rounded-pill mouth below (~72% down). -->
+  <path d="M 328 426 L 432 488 L 328 550" fill="none" stroke="url(#promptRed)"
+        stroke-width="45" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="541" y="459" width="155" height="59" rx="20" fill="url(#promptRed)"/>
+  <rect x="477" y="631" width="70" height="40" rx="20" fill="url(#promptRed)"/>
 </svg>
