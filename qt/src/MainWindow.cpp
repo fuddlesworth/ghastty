@@ -79,9 +79,12 @@ wl_display *waylandDisplay() {
 // GTK uses Adw.TabPage.needs-attention which renders as an accent
 // dot in the tab strip. Built lazily from an in-memory pixmap so we
 // don't ship an SVG asset for one glyph.
+// Cached lazily and tinted from the live QPalette::Highlight, so it must be
+// invalidated when the KDE colour scheme changes (see invalidateBellAttentionIcon).
+static QIcon g_bellAttentionIcon;
+
 static QIcon bellAttentionIcon() {
-  static QIcon cached;
-  if (cached.isNull()) {
+  if (g_bellAttentionIcon.isNull()) {
     QPixmap pm(16, 16);
     pm.fill(Qt::transparent);
     QPainter p(&pm);
@@ -93,10 +96,13 @@ static QIcon bellAttentionIcon() {
     if (accent.lightness() < 40) accent = QColor(0xff, 0x9f, 0x1c);
     p.setBrush(accent);
     p.drawEllipse(QRectF(3.0, 3.0, 10.0, 10.0));
-    cached = QIcon(pm);
+    g_bellAttentionIcon = QIcon(pm);
   }
-  return cached;
+  return g_bellAttentionIcon;
 }
+
+// Drop the cached dot so its next use re-tints from the current palette.
+static void invalidateBellAttentionIcon() { g_bellAttentionIcon = QIcon(); }
 
 // All process-shared libghostty state lives on GhosttyApp::instance().
 // MainWindow's config() and needsPremultiply() forward there so
@@ -939,6 +945,20 @@ void MainWindow::changeEvent(QEvent *e) {
       isVisible() && !isActiveWindow() &&
       config::boolean("quick-terminal-autohide", true))
     animateQuickTerminalOut();
+
+  // A KDE colour-scheme change arrives as an application palette change: the
+  // platform theme plugin updates QApplication::palette() live. Qt re-polishes
+  // and repaints standard widgets automatically, but chrome that caches or
+  // overrides palette-derived colours must re-derive explicitly so the window
+  // recolours instantly — no config reload or restart. (PaletteChange would
+  // recurse with our setPalette() below; ApplicationPaletteChange does not.)
+  if (e->type() == QEvent::ApplicationPaletteChange && m_tabs) {
+    invalidateBellAttentionIcon();  // re-tint the bell dot from the new accent
+    refreshBackdrop();              // tab-strip backdrop = QPalette::Window
+    for (int i = 0; i < m_tabs->count(); ++i)
+      updateTabText(i);             // re-apply the (now re-tinted) bell dot
+  }
+
   QWidget::changeEvent(e);
 }
 
