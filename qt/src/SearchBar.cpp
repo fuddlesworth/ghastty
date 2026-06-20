@@ -1,5 +1,6 @@
 #include "SearchBar.h"
 
+#include <QApplication>
 #include <QByteArray>
 #include <QEvent>
 #include <QHBoxLayout>
@@ -46,9 +47,7 @@ SearchBar::SearchBar(GhosttySurface *surface)
   // muted placeholder-text colour.
   m_count = new QLabel(m_field);
   m_count->setAttribute(Qt::WA_TransparentForMouseEvents);
-  QPalette pal = m_count->palette();
-  pal.setColor(QPalette::WindowText, pal.color(QPalette::PlaceholderText));
-  m_count->setPalette(pal);
+  refreshCounterColor();
 
   QToolButton *prev = makeButton(this, QStringLiteral("go-up"),
                                  QStringLiteral("▲"),
@@ -107,6 +106,24 @@ void SearchBar::setTotal(int total) {
 void SearchBar::setSelected(int selected) {
   m_selected = selected;
   updateCount();
+}
+
+void SearchBar::refreshCounterColor() {
+  if (!m_count) return;
+  // Tint the counter with the active scheme's muted placeholder hue. Derive
+  // from the live application palette (not m_count's, which carries our prior
+  // override) so it tracks the current KDE colour scheme exactly.
+  QPalette pal = QApplication::palette();
+  pal.setColor(QPalette::WindowText, pal.color(QPalette::PlaceholderText));
+  m_count->setPalette(pal);
+}
+
+void SearchBar::changeEvent(QEvent *event) {
+  // KDE colour-scheme switch (delivered app-wide as ApplicationPaletteChange):
+  // the frame/field/buttons follow the new palette automatically; only the
+  // counter's explicit colour override needs re-deriving.
+  if (event->type() == QEvent::ApplicationPaletteChange) refreshCounterColor();
+  QFrame::changeEvent(event);
 }
 
 void SearchBar::updateCount() {

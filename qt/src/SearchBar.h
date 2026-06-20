@@ -32,6 +32,9 @@ public:
 
 protected:
   bool eventFilter(QObject *obj, QEvent *event) override;
+  // Re-derive the palette-driven match-counter colour when the KDE colour
+  // scheme changes (delivered as QEvent::ApplicationPaletteChange).
+  void changeEvent(QEvent *event) override;
 
 private:
   void sendQuery();              // push the field text as `search:<text>`
@@ -39,6 +42,7 @@ private:
   void runAction(const char *action);
   void updateCount();
   void positionCount();          // place the counter inside the field
+  void refreshCounterColor();    // counter = current scheme's placeholder hue
 
   GhosttySurface *m_surface;     // not owned
   QLineEdit *m_field = nullptr;
