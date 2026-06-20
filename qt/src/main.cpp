@@ -133,9 +133,9 @@ static dbus::LaunchIntent buildLaunchIntent(int argc, char **argv) {
     if (std::strncmp(a, "--working-directory=", 20) == 0) {
       intent.workingDirectory = a + 20;
     } else if (std::strcmp(a, "-e") == 0) {
-      // Everything after -e is the command. Shell-quote each token (shared
-      // Util::shellQuote) so the `/bin/sh -c` that libghostty uses preserves
-      // argument boundaries (e.g. `-e vim "a b"`).
+      // Everything after -e is the command. Shell-quote each token (the
+      // shared shellQuote() from Util.h) so the `/bin/sh -c` that libghostty
+      // uses preserves argument boundaries (e.g. `-e vim "a b"`).
       QString cmd;
       for (int j = i + 1; j < argc; ++j) {
         if (!argv[j]) continue;
