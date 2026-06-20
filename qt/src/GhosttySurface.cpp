@@ -1762,33 +1762,6 @@ void GhosttySurface::dragEnterEvent(QDragEnterEvent *ev) {
     ev->acceptProposedAction();
 }
 
-// Quote `s` for a POSIX shell using $'…' encoding. Mirrors
-// macOS Ghostty.Shell.escape and GTK ShellEscapeWriter — handles
-// embedded quotes, backslashes, newlines, and control chars; bash's
-// `'\''` trick fails on dash/zsh + non-printable bytes.
-static QString shellQuote(const QString &s) {
-  QString out;
-  out.reserve(s.size() + 4);
-  out += QLatin1String("$'");
-  for (QChar ch : s) {
-    const ushort c = ch.unicode();
-    if (c == '\\' || c == '\'')
-      out += QLatin1Char('\\'), out += ch;
-    else if (c == '\n')
-      out += QLatin1String("\\n");
-    else if (c == '\r')
-      out += QLatin1String("\\r");
-    else if (c == '\t')
-      out += QLatin1String("\\t");
-    else if (c < 0x20)
-      out += QString::asprintf("\\x%02x", c);
-    else
-      out += ch;
-  }
-  out += QLatin1Char('\'');
-  return out;
-}
-
 void GhosttySurface::dropEvent(QDropEvent *ev) {
   const QMimeData *mime = ev->mimeData();
   // A tab tear-off released on the terminal area.

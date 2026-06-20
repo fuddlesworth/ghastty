@@ -48,6 +48,14 @@ public:
   static MainWindow *newWindow(ghostty_surface_t parent,
                                const SurfaceInit &init);
 
+  // Mark the one-shot `initial-window` bootstrap gate as already spent
+  // WITHOUT opening a window. Call this when startup deliberately declines to
+  // self-open (D-Bus activation: the launcher delivers the window-opening
+  // Activate/Open instead). Otherwise that activation-delivered window would
+  // be the "first" newWindow() and get suppressed under `initial-window=false`
+  // — but an explicit activation must always map a window.
+  static void markInitialWindowConsumed();
+
   // Build the process's single quick-terminal MainWindow on demand:
   // a layer-shell dropdown anchored to a screen edge, faded in
   // immediately. Called from GhosttyApp::toggleQuickTerminal on first
@@ -266,6 +274,11 @@ private:
   bool m_firstTabPending = true;       // first tab is created on show()
   ghostty_surface_t m_firstTabParent = nullptr;  // inherited by the 1st tab
   SurfaceInit m_firstTabInit;          // working-dir/command for the 1st tab
+
+  // One-shot gate for the `initial-window` config: the first newWindow() in
+  // the process consults it (and may skip show() for daemon-mode startup);
+  // every later window shows unconditionally. Process-global, hence static.
+  static bool s_initialWindowConsumed;
   bool m_skipCloseConfirm = false;     // close already confirmed elsewhere
   bool m_quickTerminal = false;        // this is the dropdown quick terminal
   QSize m_defaultWindowSize;           // for RESET_WINDOW_SIZE; from INITIAL_SIZE

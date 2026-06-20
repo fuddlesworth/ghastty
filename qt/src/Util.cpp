@@ -62,6 +62,29 @@ void postNotification(const QString &title, const QString &body) {
   QDBusConnection::sessionBus().send(msg);  // fire-and-forget
 }
 
+QString shellQuote(const QString &s) {
+  QString out;
+  out.reserve(s.size() + 4);
+  out += QLatin1String("$'");
+  for (QChar ch : s) {
+    const ushort c = ch.unicode();
+    if (c == '\\' || c == '\'')
+      out += QLatin1Char('\\'), out += ch;
+    else if (c == '\n')
+      out += QLatin1String("\\n");
+    else if (c == '\r')
+      out += QLatin1String("\\r");
+    else if (c == '\t')
+      out += QLatin1String("\\t");
+    else if (c < 0x20)
+      out += QString::asprintf("\\x%02x", c);
+    else
+      out += ch;
+  }
+  out += QLatin1Char('\'');
+  return out;
+}
+
 QString formatTrigger(const ghostty_input_trigger_s &t) {
   QString s;
   if (t.mods & GHOSTTY_MODS_CTRL) s += QStringLiteral("Ctrl+");

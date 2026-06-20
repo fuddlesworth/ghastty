@@ -25,6 +25,9 @@ namespace {
 // started by D-Bus / desktop activation.
 bool g_activated = false;
 
+// Set once any org.freedesktop.Application handler has opened a window.
+bool g_activationHandled = false;
+
 // Private platform_data keys we use to carry "open here" / `-e` intent across
 // the bus from a forwarding secondary to the primary. Namespaced with "x-" so
 // they can't collide with the well-known platform_data keys
@@ -45,6 +48,7 @@ SurfaceInit initFromPlatformData(const QVariantMap &platform_data) {
 
 // Open one window honoring an optional working dir / command override.
 void openWindow(const SurfaceInit &init) {
+  g_activationHandled = true;
   if (init.empty())
     MainWindow::newWindow(nullptr);
   else
@@ -144,6 +148,8 @@ bool forward(const LaunchIntent &intent) {
 }
 
 }  // namespace
+
+bool activationHandled() { return g_activationHandled; }
 
 bool startedByActivation() {
   if (g_activated) return true;

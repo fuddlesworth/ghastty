@@ -56,4 +56,12 @@ int consumeActivationFlag(int argc, char **argv);
 // On Secondary, forwards `intent` to the running primary before returning.
 Role acquire(const LaunchIntent &intent);
 
+// True once any exported org.freedesktop.Application handler has opened a
+// window (Activate / Open / ActivateAction "new-window"). A primary that
+// declined to self-open (startedByActivation) uses this to detect the case
+// where no activation message ever arrives — e.g. the private
+// --ghastty-dbus-activated flag was passed by hand with no activating client —
+// and open a fallback window so the process never sits windowless.
+bool activationHandled();
+
 }  // namespace dbus

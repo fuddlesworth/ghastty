@@ -19,12 +19,14 @@
 #include <QIcon>
 #include <QSocketNotifier>
 #include <QSurfaceFormat>
+#include <QTimer>
 
 #include "app/GhosttyApp.h"
 #include "config/Config.h"
 #include "dbus/Activation.h"
 #include "GlobalShortcuts.h"
 #include "MainWindow.h"
+#include "Util.h"
 #include "os/Systemd.h"
 #include "ghostty.h"
 
@@ -118,25 +120,6 @@ void installReloadSignalHandler(QObject *parent) {
 }
 }  // namespace
 
-// POSIX-shell single-quote a single argv token: wrap in '...' and escape any
-// embedded single quote as '\''. The forwarded command is handed to
-// libghostty's `command`, which runs a multi-word value via `/bin/sh -c`
-// (see Config.zig). Joining `-e` tokens with bare spaces would let the shell
-// re-split on whitespace and lose argument boundaries (e.g. `-e vim "a b"`
-// would open two files); quoting each token preserves them.
-static QByteArray shellQuote(const char *arg) {
-  QByteArray out;
-  out += '\'';
-  for (const char *p = arg; *p; ++p) {
-    if (*p == '\'')
-      out += "'\\''";
-    else
-      out += *p;
-  }
-  out += '\'';
-  return out;
-}
-
 // Derive what a launch wants from argv: the working directory
 // (--working-directory=) and/or the command to run (-e ...). These are the
 // pieces a single-instance secondary forwards to the running primary so
@@ -150,15 +133,16 @@ static dbus::LaunchIntent buildLaunchIntent(int argc, char **argv) {
     if (std::strncmp(a, "--working-directory=", 20) == 0) {
       intent.workingDirectory = a + 20;
     } else if (std::strcmp(a, "-e") == 0) {
-      // Everything after -e is the command. Shell-quote each token so the
-      // `/bin/sh -c` that libghostty uses preserves argument boundaries.
-      QByteArray cmd;
+      // Everything after -e is the command. Shell-quote each token (shared
+      // Util::shellQuote) so the `/bin/sh -c` that libghostty uses preserves
+      // argument boundaries (e.g. `-e vim "a b"`).
+      QString cmd;
       for (int j = i + 1; j < argc; ++j) {
         if (!argv[j]) continue;
-        if (!cmd.isEmpty()) cmd += ' ';
-        cmd += shellQuote(argv[j]);
+        if (!cmd.isEmpty()) cmd += QLatin1Char(' ');
+        cmd += shellQuote(QString::fromLocal8Bit(argv[j]));
       }
-      intent.command = cmd;
+      intent.command = cmd.toUtf8();
       break;
     }
   }
@@ -329,7 +313,13 @@ int main(int argc, char **argv) {
         // GApplication emitting `activate` once; unlike GApplication we rely
         // on the launcher honoring that one-message contract rather than
         // coalescing internally. A direct/Exec launch self-opens below.
-        if (dbus::startedByActivation()) selfOpenInitialWindow = false;
+        if (dbus::startedByActivation()) {
+          selfOpenInitialWindow = false;
+          // The activation-delivered window is an explicit user request, so it
+          // must always map — spend the `initial-window` bootstrap gate now so
+          // it isn't suppressed under `initial-window=false`.
+          MainWindow::markInitialWindowConsumed();
+        }
         break;
       case dbus::Role::Standalone:
         break;  // no session bus; behave like the old multi-process app
@@ -376,10 +366,25 @@ int main(int argc, char **argv) {
   // theme regen) recolors every open window live, no restart. See above.
   installReloadSignalHandler(&app);
 
-  // Tell systemd we finished starting up. Required for Type=notify units
-  // (e.g. the D-Bus-activated app-com.ghastty.ghastty.service): without it
-  // systemd waits for the notify and eventually times out the unit. No-op
-  // when NOTIFY_SOCKET is unset (i.e. not launched by systemd).
+  // Safety net for the D-Bus-activated path: we declined to self-open above
+  // expecting the activating launcher to deliver an Activate/Open that maps
+  // the first window. A conforming launcher always does, immediately once the
+  // loop runs. But if none ever arrives — e.g. the internal
+  // --ghastty-dbus-activated flag was passed by hand with no activating
+  // client — open a window after a short grace period so we never sit
+  // windowless and unresponsive. Gated on activationHandled() (not window
+  // count) so deliberately closing the activation window doesn't reopen one.
+  if (!selfOpenInitialWindow) {
+    QTimer::singleShot(1500, &app, [] {
+      if (!dbus::activationHandled()) MainWindow::newWindow(nullptr);
+    });
+  }
+
+  // Tell systemd we finished starting up. Required for Type=notify units: if a
+  // user runs ghastty under a hand-written systemd user unit (e.g. the
+  // `app-ghastty@<id>.service` the SIGUSR2 reload flow targets), systemd waits
+  // for this notify. No-op when NOTIFY_SOCKET is unset, which includes the
+  // shipped D-Bus *session* activation service (it has no systemd unit).
   systemd::notifyReady();
 
   return app.exec();

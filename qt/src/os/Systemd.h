@@ -2,9 +2,11 @@
 
 // sd_notify(3) integration — parity with the Zig core's src/os/systemd.zig.
 //
-// When ghastty runs as a systemd user service (e.g. the D-Bus-activated
-// `app-com.ghastty.ghastty.service`, or a hand-written
-// `app-ghastty@<id>.service`), systemd needs readiness/reload notifications:
+// These matter only when ghastty runs under a systemd user unit, which this
+// fork does NOT ship — the installed D-Bus activation file is a plain *session*
+// service (no NOTIFY_SOCKET). They apply when a user hand-writes a unit, e.g.
+// the `app-ghastty@<id>.service` the documented `systemctl --user reload` flow
+// targets. Under such a unit systemd needs readiness/reload notifications:
 //   - Type=notify        services must send READY=1 once startup completes,
 //                        otherwise systemd waits for the notify and times out.
 //   - Type=notify-reload services (the documented

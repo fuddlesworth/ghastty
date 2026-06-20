@@ -243,6 +243,10 @@ bool MainWindow::initialize() {
   return true;
 }
 
+bool MainWindow::s_initialWindowConsumed = false;
+
+void MainWindow::markInitialWindowConsumed() { s_initialWindowConsumed = true; }
+
 MainWindow *MainWindow::newWindow(ghostty_surface_t parent) {
   return newWindow(parent, SurfaceInit{});
 }
@@ -299,7 +303,6 @@ MainWindow *MainWindow::newWindow(ghostty_surface_t parent,
   // (instead of show-then-close) keeps the daemon-mode startup
   // flicker-free. After the bootstrap, `initial-window` is no
   // longer load-bearing — every subsequent newWindow() shows.
-  static bool s_initialWindowConsumed = false;
   bool wantsShow = true;
   if (!s_initialWindowConsumed) {
     s_initialWindowConsumed = true;

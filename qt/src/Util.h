@@ -40,6 +40,13 @@ QString triggerKeyName(const ghostty_input_trigger_s &t);
 // Fire-and-forget; no return code (notifications are best-effort).
 void postNotification(const QString &title, const QString &body);
 
+// Quote `s` for a POSIX shell using $'…' encoding — handles embedded quotes,
+// backslashes, newlines, and control chars. Used wherever a token is forwarded
+// into libghostty's `command` (run via `/bin/sh -c`): drag-and-drop file paths
+// and the `-e` single-instance forwarding path. Preferred over the bash
+// `'\''` trick, which fails on dash/zsh with non-printable bytes.
+QString shellQuote(const QString &s);
+
 // Format a libghostty trigger as a human-readable chord (e.g. "Ctrl+B").
 // Used for context-menu shortcut hints and the key-sequence overlay.
 // Unmapped physical keys render as "•"; trigger.tag CATCH_ALL renders
