@@ -5,6 +5,7 @@
 #include <QWidget>
 
 #include "ghostty.h"
+#include "SurfaceInit.h"
 
 class BellPlayer;
 class QCloseEvent;
@@ -40,6 +41,13 @@ public:
   // tab whose surface inherits from `parent` (may be null).
   static MainWindow *newWindow(ghostty_surface_t parent);
 
+  // Same, but the first tab's surface applies `init` (working directory /
+  // initial command) instead of inheriting. Used by the D-Bus activation /
+  // single-instance path ("open terminal here", `-e`). `parent` is normally
+  // null in this path; if set, `init` is ignored (inheritance wins).
+  static MainWindow *newWindow(ghostty_surface_t parent,
+                               const SurfaceInit &init);
+
   // Build the process's single quick-terminal MainWindow on demand:
   // a layer-shell dropdown anchored to a screen edge, faded in
   // immediately. Called from GhosttyApp::toggleQuickTerminal on first
@@ -54,8 +62,11 @@ public:
   bool isQuickTerminal() const { return m_quickTerminal; }
 
   // Open a new tab. `parent` (may be null) is the surface whose working
-  // directory etc. the new surface should inherit.
-  GhosttySurface *newTab(ghostty_surface_t parent);
+  // directory etc. the new surface should inherit. `init` (may be null)
+  // overrides working directory / command for the surface and is honored
+  // only when `parent` is null (used for a new window's first tab).
+  GhosttySurface *newTab(ghostty_surface_t parent,
+                         const SurfaceInit *init = nullptr);
 
   // Split `target`'s pane in two, adding a new surface beside it.
   GhosttySurface *splitSurface(GhosttySurface *target,
@@ -254,6 +265,7 @@ private:
   QList<GhosttySurface *> m_surfaces;  // every live surface in this window
   bool m_firstTabPending = true;       // first tab is created on show()
   ghostty_surface_t m_firstTabParent = nullptr;  // inherited by the 1st tab
+  SurfaceInit m_firstTabInit;          // working-dir/command for the 1st tab
   bool m_skipCloseConfirm = false;     // close already confirmed elsewhere
   bool m_quickTerminal = false;        // this is the dropdown quick terminal
   QSize m_defaultWindowSize;           // for RESET_WINDOW_SIZE; from INITIAL_SIZE

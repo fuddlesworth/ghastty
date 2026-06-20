@@ -75,7 +75,8 @@
 #include <QWheelEvent>
 
 GhosttySurface::GhosttySurface(ghostty_app_t app, MainWindow *owner,
-                               ghostty_surface_t parent_surface)
+                               ghostty_surface_t parent_surface,
+                               const SurfaceInit *init)
     : m_app(app), m_owner(owner), m_parentSurface(parent_surface) {
   setFocusPolicy(Qt::StrongFocus);
   setMouseTracking(true);  // deliver motion events for hover/link detection
@@ -233,6 +234,17 @@ GhosttySurface::GhosttySurface(ghostty_app_t app, MainWindow *owner,
   // owner (shouldn't happen for a real surface).
   sc.scale_factor =
       m_owner ? m_owner->devicePixelRatioF() : devicePixelRatioF();
+
+  // Per-window overrides for a brand-new window's first surface (working
+  // directory / initial command from the D-Bus "open here" / `-e` path).
+  // Only for parentless surfaces — tabs/splits inherit from their parent
+  // above. The QByteArrays live in the caller's SurfaceInit, which outlives
+  // this synchronous ghostty_surface_new() call.
+  if (!m_parentSurface && init) {
+    if (!init->workingDirectory.isEmpty())
+      sc.working_directory = init->workingDirectory.constData();
+    if (!init->command.isEmpty()) sc.command = init->command.constData();
+  }
 
   m_surface = ghostty_surface_new(m_app, &sc);
   if (!m_surface) {

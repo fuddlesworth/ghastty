@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.ghastty.ghastty</id>
+  <launchable type="desktop-id">com.ghastty.ghastty.desktop</launchable>
+  <name>Ghastty</name>
+  <url type="homepage">https://ghostty.org</url>
+  <url type="help">https://ghostty.org/docs</url>
+  <summary>A fast, feature-rich terminal emulator (Qt frontend)</summary>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <content_rating type="oars-1.1" />
+  <description>
+    <p>
+      Ghastty is a Qt frontend for the Ghostty terminal core: a terminal
+      emulator that differentiates itself by being fast, feature-rich, and
+      native. While there are many excellent terminal emulators available,
+      they all force you to choose between speed, features, or native UIs.
+      Ghostty provides all three.
+    </p>
+  </description>
+  <recommends>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </recommends>
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
+</component>

@@ -6,6 +6,7 @@
 #include <memory>
 #include <mutex>
 
+#include <QByteArray>
 #include <QImage>
 #include <QMutex>
 #include <QPointer>
@@ -15,6 +16,7 @@
 #include <QWidget>
 
 #include "ghostty.h"
+#include "SurfaceInit.h"
 #include "vulkan/Host.h"
 
 namespace wayland {
@@ -71,9 +73,12 @@ class GhosttySurface : public QWidget, public vulkan::PresentSink {
 
 public:
   // `parent_surface` (may be null) is the surface whose working
-  // directory etc. a new surface should inherit.
+  // directory etc. a new surface should inherit. `init` (may be null) carries
+  // per-window overrides for the first surface of a new window; it is ignored
+  // when `parent_surface` is set (tabs/splits always inherit from the parent).
   GhosttySurface(ghostty_app_t app, MainWindow *owner,
-                 ghostty_surface_t parent_surface);
+                 ghostty_surface_t parent_surface,
+                 const SurfaceInit *init = nullptr);
   ~GhosttySurface() override;
 
   ghostty_surface_t surface() const { return m_surface; }

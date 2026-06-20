@@ -1,0 +1,8 @@
+[D-BUS Service]
+Name=com.ghastty.ghastty
+# Started by dbus-daemon when something activates the bus name (e.g. a
+# DBusActivatable launcher). The private --ghastty-dbus-activated flag tells
+# the process it was activation-launched, so it waits for the Activate/Open
+# call to open its first window instead of self-opening one. The flag is
+# stripped from argv before libghostty sees it (see consumeActivationFlag).
+Exec=@GHASTTY_EXEC@ --ghastty-dbus-activated

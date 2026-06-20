@@ -194,6 +194,8 @@ add_executable(ghastty
   src/InspectorWindow.cpp
   src/input/XkbState.cpp
   src/MainWindow.cpp
+  src/os/Systemd.cpp
+  src/dbus/Activation.cpp
   src/OverlayScrollbar.cpp
   src/quickterm/QuickTerminal.cpp
   src/SearchBar.cpp
@@ -317,9 +319,31 @@ install(FILES "${GHOSTTY_SO}"
   DESTINATION "${CMAKE_INSTALL_LIBDIR}"
   RENAME libghostty.so)
 
-install(FILES dist/ghastty.desktop
+# Desktop entry. Its basename MUST equal the D-Bus app id (com.ghastty.ghastty)
+# for window↔launcher association and DBusActivatable to work.
+install(FILES dist/com.ghastty.ghastty.desktop
   DESTINATION "${CMAKE_INSTALL_DATADIR}/applications")
 
-# The custom scalable app icon.
+# The custom scalable app icon, named after the app id so the desktop entry's
+# Icon=com.ghastty.ghastty and the Wayland app-id resolve to it.
 install(FILES dist/ghastty.svg
-  DESTINATION "${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps")
+  DESTINATION "${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps"
+  RENAME com.ghastty.ghastty.svg)
+
+# AppStream metainfo so software centers list the app.
+install(FILES dist/com.ghastty.ghastty.metainfo.xml
+  DESTINATION "${CMAKE_INSTALL_DATADIR}/metainfo")
+
+# KDE Dolphin "Open Ghastty Here" service menu (right-click in a folder).
+# Installed under the app id, matching upstream's servicemenu naming.
+install(FILES dist/ghastty_dolphin.desktop
+  DESTINATION "${CMAKE_INSTALL_DATADIR}/kio/servicemenus"
+  RENAME com.ghastty.ghastty.desktop)
+
+# D-Bus session service file so the bus can activate us on demand
+# (DBusActivatable). The Exec needs the installed binary's absolute path.
+set(GHASTTY_EXEC "${CMAKE_INSTALL_FULL_BINDIR}/ghastty")
+configure_file(dist/com.ghastty.ghastty.service.in
+  "${CMAKE_CURRENT_BINARY_DIR}/com.ghastty.ghastty.service" @ONLY)
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/com.ghastty.ghastty.service"
+  DESTINATION "${CMAKE_INSTALL_DATADIR}/dbus-1/services")

@@ -51,6 +51,7 @@
 #include "config/Config.h"
 #include "CommandPalette.h"
 #include "GhosttySurface.h"
+#include "os/Systemd.h"
 #include "quickterm/QuickTerminal.h"
 #include "TabWidget.h"
 #include "Toast.h"
@@ -243,6 +244,11 @@ bool MainWindow::initialize() {
 }
 
 MainWindow *MainWindow::newWindow(ghostty_surface_t parent) {
+  return newWindow(parent, SurfaceInit{});
+}
+
+MainWindow *MainWindow::newWindow(ghostty_surface_t parent,
+                                  const SurfaceInit &init) {
   // If the natural-close quit timer is running (because the last
   // window was closed and we're inside the configured delay), cancel
   // it now: the process is no longer headless. macOS/GTK do the
@@ -253,6 +259,7 @@ MainWindow *MainWindow::newWindow(ghostty_surface_t parent) {
   auto *w = new MainWindow;
   w->setAttribute(Qt::WA_DeleteOnClose);  // self-destruct when closed
   w->m_firstTabParent = parent;           // first tab inherits from `parent`
+  w->m_firstTabInit = init;               // ...or applies these overrides
   if (!w->initialize()) {
     delete w;
     return nullptr;
@@ -367,12 +374,17 @@ bool MainWindow::event(QEvent *e) {
 void MainWindow::createFirstTab() {
   if (!m_firstTabPending) return;
   m_firstTabPending = false;
-  newTab(m_firstTabParent);
+  newTab(m_firstTabParent, m_firstTabInit.empty() ? nullptr : &m_firstTabInit);
   m_firstTabParent = nullptr;
+  m_firstTabInit = SurfaceInit{};
 }
 
-GhosttySurface *MainWindow::newTab(ghostty_surface_t parent) {
-  auto *surface = new GhosttySurface(GhosttyApp::instance().app(), this, parent);
+GhosttySurface *MainWindow::newTab(ghostty_surface_t parent,
+                                   const SurfaceInit *init) {
+  // Overrides only apply to a window's first, parentless surface; tabs
+  // opened later inherit from their parent and ignore `init`.
+  auto *surface = new GhosttySurface(GhosttyApp::instance().app(), this, parent,
+                                     parent ? nullptr : init);
   m_surfaces.append(surface);
 
   // The tab page hosts the tab's split tree (initially one surface).
@@ -1281,6 +1293,15 @@ void MainWindow::reloadConfig() { reloadConfigGlobal(); }
 
 void MainWindow::reloadConfigGlobal() {
   if (!GhosttyApp::instance().app()) return;
+
+  // Bracket the reload with systemd notifications so the documented
+  // `systemctl --user reload app-ghastty@<id>.service` flow (a
+  // Type=notify-reload unit that delivers SIGUSR2) sees the reload start
+  // and finish; otherwise systemd treats the reload as hung. No-ops when
+  // not launched by systemd. Mirrors GTK's reloadConfig (application.zig).
+  // Paired with the notifyReady() at the end of this function.
+  systemd::notifyReloading();
+
   // Re-read the config from disk in the same order as initialize()
   // (config::loadUserFiles prefers ghastty/config over ghostty/config).
   ghostty_config_t config = ghostty_config_new();
@@ -1320,6 +1341,10 @@ void MainWindow::reloadConfigGlobal() {
     for (MainWindow *w : GhosttyApp::instance().windows())
       w->showToast(QStringLiteral("Reloaded the configuration"));
   }
+
+  // Reload finished — tell systemd we are ready again (pairs with the
+  // notifyReloading() at the top of this function).
+  systemd::notifyReady();
 }
 
 bool MainWindow::focusFollowsMouse() const {
