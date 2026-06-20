@@ -14,12 +14,18 @@
      emboss shadow, the cursor block is rounded, and the mouth is a
      rounded pill rather than a plain square.
 
-     Proportions matched to upstream's solid body (319x387, h/w 1.213,
-     ~71.5% of canvas height): body 604 wide x 732 tall, centered at
-     x=512, dome apex y=121, feet bottom y=853. Dark outline + soft outer
-     glow keep it legible on light desktop panels (no bezel to frame it). -->
+     Proportions matched to upstream's solid body (319x387, h/w 1.213):
+     body 604 wide x 732 tall, centered at x=512, dome apex y=121, feet
+     bottom ~y=832. Dark outline + soft outer glow keep it legible on light
+     desktop panels (no bezel to frame it).
+
+     The viewBox tightly frames the ghost (centered on 512,477 with a ~50px
+     margin for the outer glow) instead of using the full 1024 artwork
+     canvas, so the ghost fills ~88% of the rendered icon and matches the
+     visual weight of neighbouring taskbar icons. Paths/gradients are in the
+     original user space; only the viewBox window changed. -->
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024"
-     viewBox="0 0 1024 1024">
+     viewBox="106 71 812 812">
   <defs>
     <linearGradient id="ghostBody" gradientUnits="userSpaceOnUse"
                     x1="512" y1="121" x2="512" y2="853">
