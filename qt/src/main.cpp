@@ -2,6 +2,10 @@
 #include <cstdlib>
 #include <cstring>
 
+#include <fcntl.h>
+#include <signal.h>
+#include <unistd.h>
+
 // (The atexit hook to ghastty_glslang_finalize_process that used
 // to live here was removed: now that build-time SPV precompile
 // is in place, the runtime libghostty no longer calls the glslang
@@ -13,11 +17,17 @@
 #include <QApplication>
 #include <QCoreApplication>
 #include <QIcon>
+#include <QSocketNotifier>
 #include <QSurfaceFormat>
+#include <QTimer>
 
 #include "app/GhosttyApp.h"
+#include "config/Config.h"
+#include "dbus/Activation.h"
 #include "GlobalShortcuts.h"
 #include "MainWindow.h"
+#include "Util.h"
+#include "os/Systemd.h"
 #include "ghostty.h"
 
 // True when any argv entry starts with `+` — i.e. the user invoked a
@@ -65,7 +75,120 @@ static void defaultDisableMangoHud() {
   ::setenv("VK_LOADER_LAYERS_DISABLE", "*MANGOHUD*", 1);
 }
 
+// Reload the configuration on SIGUSR2 — parity with the GTK apprt
+// (application.zig handleSigusr2) and the documented Linux flow
+// `systemctl --user reload app-ghastty@<id>.service`, which sends SIGUSR2 to
+// the main process. The Qt apprt previously installed no handler, so SIGUSR2
+// hit the default disposition and TERMINATED ghastty instead of reloading.
+//
+// A Unix signal handler runs in an async, mostly-unsafe context, so it must not
+// touch Qt directly. Standard self-pipe trick: the handler only write()s a byte
+// (async-signal-safe); a QSocketNotifier turns that into a normal main-thread
+// callback that runs the real, app-scoped reload (all windows).
+namespace {
+int g_reloadPipe[2] = {-1, -1};
+
+void onSigusr2(int) {
+  const char b = 1;
+  const ssize_t n = ::write(g_reloadPipe[1], &b, 1);
+  (void)n;  // nothing safe to do on failure inside a signal handler
+}
+
+void installReloadSignalHandler(QObject *parent) {
+  if (::pipe(g_reloadPipe) != 0) return;
+  for (const int fd : g_reloadPipe) {
+    // Non-blocking so the handler's write() and the drain read() never block;
+    // CLOEXEC so the self-pipe doesn't leak into spawned shells/ptys.
+    ::fcntl(fd, F_SETFL, ::fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+    ::fcntl(fd, F_SETFD, ::fcntl(fd, F_GETFD, 0) | FD_CLOEXEC);
+  }
+
+  auto *notifier =
+      new QSocketNotifier(g_reloadPipe[0], QSocketNotifier::Read, parent);
+  QObject::connect(notifier, &QSocketNotifier::activated, parent, []() {
+    char buf[16];
+    while (::read(g_reloadPipe[0], buf, sizeof(buf)) > 0) {
+    }  // drain coalesced signals
+    MainWindow::reloadConfigGlobal();
+  });
+
+  struct sigaction sa = {};
+  sa.sa_handler = onSigusr2;
+  ::sigemptyset(&sa.sa_mask);
+  sa.sa_flags = SA_RESTART;
+  ::sigaction(SIGUSR2, &sa, nullptr);
+}
+}  // namespace
+
+// Derive what a launch wants from argv: the working directory
+// (--working-directory=) and/or the command to run (-e ...). These are the
+// pieces a single-instance secondary forwards to the running primary so
+// "open terminal here" and `ghastty -e cmd` open the right window. Everything
+// else (full config parsing) is left to libghostty in the primary.
+static dbus::LaunchIntent buildLaunchIntent(int argc, char **argv) {
+  dbus::LaunchIntent intent;
+  for (int i = 1; i < argc; ++i) {
+    const char *a = argv[i];
+    if (!a) continue;
+    if (std::strncmp(a, "--working-directory=", 20) == 0) {
+      intent.workingDirectory = a + 20;
+    } else if (std::strcmp(a, "-e") == 0) {
+      // Everything after -e is the command. Shell-quote each token (the
+      // shared shellQuote() from Util.h) so the `/bin/sh -c` that libghostty
+      // uses preserves argument boundaries (e.g. `-e vim "a b"`).
+      QString cmd;
+      for (int j = i + 1; j < argc; ++j) {
+        if (!argv[j]) continue;
+        if (!cmd.isEmpty()) cmd += QLatin1Char(' ');
+        cmd += shellQuote(QString::fromLocal8Bit(argv[j]));
+      }
+      intent.command = cmd.toUtf8();
+      break;
+    }
+  }
+  return intent;
+}
+
+// Resolve single-instance mode exactly like the GTK apprt's
+// `gtk-single-instance` config (see Config.zig gtk-single-instance docs +
+// finalize, and probableCliEnvironment). libghostty built with
+// `-Dapp-runtime=none` does NOT resolve `detect` (that only runs for the gtk
+// runtime), so we reproduce the heuristic here:
+//   - true  -> single instance
+//   - false -> separate process per launch
+//   - detect -> single instance UNLESS this looks like a CLI launch, i.e.
+//               TERM_PROGRAM is non-empty (launched from a graphical terminal,
+//               wants a dedicated instance) or any CLI arguments were given
+//               (custom config must not be inherited from a running instance).
+// Requires the config to already be loaded (GhosttyApp::ensureInitialized).
+//
+// `had_cli_args` MUST be computed from the original arg count, BEFORE
+// QApplication strips its own options (-style, -platform, …). GTK's heuristic
+// counts the raw argv (`std.os.argv.len > 1`); counting the post-strip argc
+// would let a Qt-only flag silently flip the mode.
+static bool resolveSingleInstance(bool had_cli_args) {
+  const QString v = config::string("gtk-single-instance");
+  if (v == QLatin1String("true")) return true;
+  if (v == QLatin1String("false")) return false;
+
+  // detect (the default; also the fallback for any unexpected value).
+  const char *term_program = ::getenv("TERM_PROGRAM");
+  const bool probable_cli =
+      (term_program && term_program[0] != '\0') || had_cli_args;
+  return !probable_cli;
+}
+
 int main(int argc, char **argv) {
+  // Strip our private D-Bus-activation marker (injected by the dbus.service
+  // Exec) before anything else parses argv — Qt and libghostty must never see
+  // it. Records that we were activation-launched (see startedByActivation()).
+  argc = dbus::consumeActivationFlag(argc, argv);
+
+  // Snapshot whether the user passed any CLI args NOW — before QApplication's
+  // ctor strips its own options from argv. Drives the `gtk-single-instance`
+  // detect heuristic (see resolveSingleInstance).
+  const bool had_cli_args = argc > 1;
+
   // Set the env BEFORE Qt's QApplication ctor (which can probe
   // GL/Vulkan via QPA) and before the CLI action path (since
   // libghostty action handlers may also touch the renderer).
@@ -130,13 +253,16 @@ int main(int argc, char **argv) {
   QCoreApplication::setApplicationName(QStringLiteral("ghastty"));
   QCoreApplication::setOrganizationName(QStringLiteral("ghastty"));
 
-  // Match the installed ghastty.desktop: this becomes the Wayland app-id
-  // so the compositor associates the window with the desktop entry —
-  // taskbar icon, launcher identity.
-  QGuiApplication::setDesktopFileName(QStringLiteral("ghastty"));
+  // Match the installed com.ghastty.ghastty.desktop: this becomes the Wayland
+  // app-id so the compositor associates the window with the desktop entry —
+  // taskbar icon, launcher identity. It MUST equal the desktop file basename
+  // and the D-Bus bus name (dbus::kAppId) for window↔launcher association and
+  // DBusActivatable to work; see qt/dist/com.ghastty.ghastty.* and
+  // qt/src/dbus/Activation.h.
+  QGuiApplication::setDesktopFileName(QString::fromLatin1(dbus::kAppId));
 
-  // The window icon, embedded so it works even running from the build
-  // tree (when ghastty.desktop / the icon theme are not yet installed).
+  // The window icon, embedded so it works even running from the build tree
+  // (when the desktop entry / icon theme are not yet installed).
   QGuiApplication::setWindowIcon(QIcon(QStringLiteral(":/ghastty.svg")));
 
   // We keep the user's system widget style rather than forcing Fusion.
@@ -158,6 +284,48 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+  // Build the libghostty app + load config now so the single-instance decision
+  // can read `gtk-single-instance`. Idempotent; later newWindow() calls reuse
+  // it. (A D-Bus-activated primary that skips self-open relies on this so its
+  // Activate/Open handler has a ready app.)
+  if (!GhosttyApp::instance().ensureInitialized()) {
+    std::fprintf(stderr, "[ghastty] initialization failed\n");
+    return 1;
+  }
+
+  // Single-instance + D-Bus activation (parity with GApplication on GTK).
+  // When single-instance is enabled we own the session-bus name
+  // com.ghastty.ghastty and export org.freedesktop.Application; a second
+  // launch forwards its intent to the running instance and exits instead of
+  // spawning a duplicate. Honors `gtk-single-instance` just like GTK.
+  bool selfOpenInitialWindow = true;
+  if (resolveSingleInstance(had_cli_args)) {
+    switch (dbus::acquire(buildLaunchIntent(argc, argv))) {
+      case dbus::Role::Secondary:
+        // Already forwarded to the primary; nothing more to do.
+        return 0;
+      case dbus::Role::Primary:
+        // When started BY activation, don't self-open here (that would double
+        // up): per the org.freedesktop.Application contract the activating
+        // launcher delivers exactly one activation message for this launch —
+        // Activate when there are no files, or Open when there are — and our
+        // handler opens the first window in response. This mirrors
+        // GApplication emitting `activate` once; unlike GApplication we rely
+        // on the launcher honoring that one-message contract rather than
+        // coalescing internally. A direct/Exec launch self-opens below.
+        if (dbus::startedByActivation()) {
+          selfOpenInitialWindow = false;
+          // The activation-delivered window is an explicit user request, so it
+          // must always map — spend the `initial-window` bootstrap gate now so
+          // it isn't suppressed under `initial-window=false`.
+          MainWindow::markInitialWindowConsumed();
+        }
+        break;
+      case dbus::Role::Standalone:
+        break;  // no session bus; behave like the old multi-process app
+    }
+  }
+
   // The Vulkan host is intentionally NOT bootstrapped here: doing it
   // before any window is mapped on Wayland can interact badly with
   // Qt's Wayland integration (the VkInstance starts grabbing display
@@ -173,7 +341,11 @@ int main(int argc, char **argv) {
   // terminal shortcut. The first MainWindow::newWindow internally
   // checks the config and skips show() — so the libghostty app +
   // config still get built, but no QWindow ever appears.
-  if (!MainWindow::newWindow(nullptr)) {
+  //
+  // selfOpenInitialWindow is false only when we were D-Bus-activated: the
+  // app + config are bootstrapped lazily by the first newWindow() the
+  // incoming Activate/Open handler runs once the event loop starts.
+  if (selfOpenInitialWindow && !MainWindow::newWindow(nullptr)) {
     std::fprintf(stderr, "[ghastty] window initialization failed\n");
     return 1;
   }
@@ -189,6 +361,31 @@ int main(int argc, char **argv) {
                      else if (id == QLatin1String("toggle-visibility"))
                        GhosttyApp::instance().toggleVisibility();
                    });
+
+  // Reload config on SIGUSR2 so `systemctl --user reload` (and matugen's
+  // theme regen) recolors every open window live, no restart. See above.
+  installReloadSignalHandler(&app);
+
+  // Safety net for the D-Bus-activated path: we declined to self-open above
+  // expecting the activating launcher to deliver an Activate/Open that maps
+  // the first window. A conforming launcher always does, immediately once the
+  // loop runs. But if none ever arrives — e.g. the internal
+  // --ghastty-dbus-activated flag was passed by hand with no activating
+  // client — open a window after a short grace period so we never sit
+  // windowless and unresponsive. Gated on activationHandled() (not window
+  // count) so deliberately closing the activation window doesn't reopen one.
+  if (!selfOpenInitialWindow) {
+    QTimer::singleShot(1500, &app, [] {
+      if (!dbus::activationHandled()) MainWindow::newWindow(nullptr);
+    });
+  }
+
+  // Tell systemd we finished starting up. Required for Type=notify units: if a
+  // user runs ghastty under a hand-written systemd user unit (e.g. the
+  // `app-ghastty@<id>.service` the SIGUSR2 reload flow targets), systemd waits
+  // for this notify. No-op when NOTIFY_SOCKET is unset, which includes the
+  // shipped D-Bus *session* activation service (it has no systemd unit).
+  systemd::notifyReady();
 
   return app.exec();
 }

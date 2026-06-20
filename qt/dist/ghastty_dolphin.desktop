@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Service
+ServiceTypes=KonqPopupMenu/Plugin
+MimeType=inode/directory
+Actions=RunGhasttyDir
+
+[Desktop Action RunGhasttyDir]
+Name=Open Ghastty Here
+Icon=com.ghastty.ghastty
+Exec=ghastty --working-directory=%f

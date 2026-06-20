@@ -7,6 +7,8 @@
 #include <QStringLiteral>
 #include <QVariantMap>
 
+#include "dbus/Activation.h"
+
 // We index libghostty's GHOSTTY_KEY_DIGIT_0..9 and GHOSTTY_KEY_A..Z
 // enum ranges by arithmetic offset. If libghostty ever inserts an
 // entry into either range the math goes wrong silently — pin the
@@ -43,17 +45,44 @@ void postNotification(const QString &title, const QString &body) {
       QStringLiteral("/org/freedesktop/Notifications"),
       QStringLiteral("org.freedesktop.Notifications"),
       QStringLiteral("Notify"));
+  // app_icon is an icon-theme name; it must match the installed icon, which is
+  // named after the app id (com.ghastty.ghastty.svg). Derive it from
+  // dbus::kAppId — the single source of truth — so a bare "ghastty" doesn't go
+  // stale and leave notifications icon-less.
   msg.setArguments({
-      QStringLiteral("Ghastty"),             // app_name
-      uint(0),                               // replaces_id
-      QStringLiteral("ghastty"),             // app_icon
-      title,                                 // summary
-      body,                                  // body
-      QStringList(),                         // actions
-      QVariantMap(),                         // hints
-      -1,                                    // expire_timeout (default)
+      QStringLiteral("Ghastty"),          // app_name
+      uint(0),                            // replaces_id
+      QString::fromLatin1(dbus::kAppId),  // app_icon
+      title,                              // summary
+      body,                               // body
+      QStringList(),                      // actions
+      QVariantMap(),                      // hints
+      -1,                                 // expire_timeout (default)
   });
   QDBusConnection::sessionBus().send(msg);  // fire-and-forget
+}
+
+QString shellQuote(const QString &s) {
+  QString out;
+  out.reserve(s.size() + 4);
+  out += QLatin1String("$'");
+  for (QChar ch : s) {
+    const ushort c = ch.unicode();
+    if (c == '\\' || c == '\'')
+      out += QLatin1Char('\\'), out += ch;
+    else if (c == '\n')
+      out += QLatin1String("\\n");
+    else if (c == '\r')
+      out += QLatin1String("\\r");
+    else if (c == '\t')
+      out += QLatin1String("\\t");
+    else if (c < 0x20)
+      out += QString::asprintf("\\x%02x", c);
+    else
+      out += ch;
+  }
+  out += QLatin1Char('\'');
+  return out;
 }
 
 QString formatTrigger(const ghostty_input_trigger_s &t) {
