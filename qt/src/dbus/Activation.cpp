@@ -8,7 +8,6 @@
 #include <QDBusAbstractAdaptor>
 #include <QDBusConnection>
 #include <QDBusMessage>
-#include <QDir>
 #include <QFileInfo>
 #include <QString>
 #include <QStringList>
@@ -71,9 +70,11 @@ class AppAdaptor : public QDBusAbstractAdaptor {
     openWindow(initFromPlatformData(platform_data));
   }
 
-  // Open the given URIs. For a terminal we interpret each as a location to
-  // open a window at: a directory becomes the working directory; a file uses
-  // its containing directory.
+  // Open the given URIs. For a terminal we interpret each LOCAL location as a
+  // place to open a window at: a directory becomes the working directory; a
+  // file uses its containing directory. Non-local URIs (http://, ssh://, …)
+  // have no meaningful working directory, so we just open a plain window for
+  // them rather than resolving the raw URI string against our own CWD.
   void Open(const QStringList &uris, const QVariantMap &platform_data) {
     Q_UNUSED(platform_data);
     if (uris.isEmpty()) {
@@ -81,10 +82,12 @@ class AppAdaptor : public QDBusAbstractAdaptor {
       return;
     }
     for (const QString &uri : uris) {
-      const QString path = QUrl(uri).isLocalFile()
-                               ? QUrl(uri).toLocalFile()
-                               : uri;
-      QFileInfo info(path);
+      const QUrl url(uri);
+      if (!url.isLocalFile()) {
+        openWindow(SurfaceInit{});
+        continue;
+      }
+      QFileInfo info(url.toLocalFile());
       const QString dir = info.isDir() ? info.absoluteFilePath()
                                        : info.absolutePath();
       SurfaceInit init;
@@ -106,11 +109,13 @@ class AppAdaptor : public QDBusAbstractAdaptor {
   }
 };
 
-// Forward this launch's intent to the running primary instance, then let the
-// caller exit. We always call Activate (matching a plain re-launch / taskbar
-// activation = new window) and ride any working-dir/command override in
-// platform_data — the primary's Activate slot decodes it.
-void forward(const LaunchIntent &intent) {
+// Forward this launch's intent to the running primary instance. We always call
+// Activate (matching a plain re-launch / taskbar activation = new window) and
+// ride any working-dir/command override in platform_data — the primary's
+// Activate slot decodes it. Returns true if the primary acknowledged; false on
+// any D-Bus error (e.g. the owner is wedged), so the caller can fall back to
+// opening a window itself rather than silently exiting with no window.
+bool forward(const LaunchIntent &intent) {
   QVariantMap platform_data;
   if (!intent.workingDirectory.isEmpty())
     platform_data.insert(QString::fromLatin1(kKeyWorkingDirectory),
@@ -125,11 +130,17 @@ void forward(const LaunchIntent &intent) {
       QStringLiteral("Activate"));
   msg << QVariant::fromValue(platform_data);
 
-  const QDBusMessage reply = QDBusConnection::sessionBus().call(msg);
-  if (reply.type() == QDBusMessage::ErrorMessage)
+  // Bounded timeout so a hung primary doesn't block the launch for the default
+  // ~25s; on failure we fall back to a standalone window (see acquire).
+  const QDBusMessage reply =
+      QDBusConnection::sessionBus().call(msg, QDBus::Block, 3000);
+  if (reply.type() == QDBusMessage::ErrorMessage) {
     std::fprintf(stderr,
                  "[ghastty] failed to forward to running instance: %s\n",
                  reply.errorMessage().toUtf8().constData());
+    return false;
+  }
+  return true;
 }
 
 }  // namespace
@@ -160,8 +171,10 @@ Role acquire(const LaunchIntent &intent) {
 
   // registerService succeeds only for the first instance to claim the name.
   if (!bus.registerService(QString::fromLatin1(kAppId))) {
-    forward(intent);
-    return Role::Secondary;
+    // A primary already owns the name: hand off our intent and exit. If the
+    // hand-off fails (primary wedged/unreachable), fall back to Standalone so
+    // the caller still opens a window rather than vanishing silently.
+    return forward(intent) ? Role::Secondary : Role::Standalone;
   }
 
   // We are the primary: export org.freedesktop.Application. The service object

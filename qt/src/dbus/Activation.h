@@ -25,10 +25,6 @@ inline constexpr char kObjectPath[] = "/com/ghastty/ghastty";
 struct LaunchIntent {
   QByteArray workingDirectory;  // from --working-directory=
   QByteArray command;           // from -e ...
-
-  bool hasOverrides() const {
-    return !workingDirectory.isEmpty() || !command.isEmpty();
-  }
 };
 
 enum class Role {

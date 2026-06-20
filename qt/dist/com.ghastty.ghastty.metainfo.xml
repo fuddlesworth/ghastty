@@ -8,6 +8,9 @@
   <summary>A fast, feature-rich terminal emulator (Qt frontend)</summary>
   <metadata_license>MIT</metadata_license>
   <project_license>MIT</project_license>
+  <developer id="org.ghostty">
+    <name>Ghostty</name>
+  </developer>
   <content_rating type="oars-1.1" />
   <description>
     <p>

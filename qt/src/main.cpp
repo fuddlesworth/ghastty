@@ -118,6 +118,25 @@ void installReloadSignalHandler(QObject *parent) {
 }
 }  // namespace
 
+// POSIX-shell single-quote a single argv token: wrap in '...' and escape any
+// embedded single quote as '\''. The forwarded command is handed to
+// libghostty's `command`, which runs a multi-word value via `/bin/sh -c`
+// (see Config.zig). Joining `-e` tokens with bare spaces would let the shell
+// re-split on whitespace and lose argument boundaries (e.g. `-e vim "a b"`
+// would open two files); quoting each token preserves them.
+static QByteArray shellQuote(const char *arg) {
+  QByteArray out;
+  out += '\'';
+  for (const char *p = arg; *p; ++p) {
+    if (*p == '\'')
+      out += "'\\''";
+    else
+      out += *p;
+  }
+  out += '\'';
+  return out;
+}
+
 // Derive what a launch wants from argv: the working directory
 // (--working-directory=) and/or the command to run (-e ...). These are the
 // pieces a single-instance secondary forwards to the running primary so
@@ -131,12 +150,13 @@ static dbus::LaunchIntent buildLaunchIntent(int argc, char **argv) {
     if (std::strncmp(a, "--working-directory=", 20) == 0) {
       intent.workingDirectory = a + 20;
     } else if (std::strcmp(a, "-e") == 0) {
-      // Everything after -e is the command; join with spaces.
+      // Everything after -e is the command. Shell-quote each token so the
+      // `/bin/sh -c` that libghostty uses preserves argument boundaries.
       QByteArray cmd;
       for (int j = i + 1; j < argc; ++j) {
         if (!argv[j]) continue;
         if (!cmd.isEmpty()) cmd += ' ';
-        cmd += argv[j];
+        cmd += shellQuote(argv[j]);
       }
       intent.command = cmd;
       break;
@@ -157,7 +177,12 @@ static dbus::LaunchIntent buildLaunchIntent(int argc, char **argv) {
 //               wants a dedicated instance) or any CLI arguments were given
 //               (custom config must not be inherited from a running instance).
 // Requires the config to already be loaded (GhosttyApp::ensureInitialized).
-static bool resolveSingleInstance(int argc) {
+//
+// `had_cli_args` MUST be computed from the original arg count, BEFORE
+// QApplication strips its own options (-style, -platform, …). GTK's heuristic
+// counts the raw argv (`std.os.argv.len > 1`); counting the post-strip argc
+// would let a Qt-only flag silently flip the mode.
+static bool resolveSingleInstance(bool had_cli_args) {
   const QString v = config::string("gtk-single-instance");
   if (v == QLatin1String("true")) return true;
   if (v == QLatin1String("false")) return false;
@@ -165,7 +190,7 @@ static bool resolveSingleInstance(int argc) {
   // detect (the default; also the fallback for any unexpected value).
   const char *term_program = ::getenv("TERM_PROGRAM");
   const bool probable_cli =
-      (term_program && term_program[0] != '\0') || argc > 1;
+      (term_program && term_program[0] != '\0') || had_cli_args;
   return !probable_cli;
 }
 
@@ -174,6 +199,11 @@ int main(int argc, char **argv) {
   // Exec) before anything else parses argv — Qt and libghostty must never see
   // it. Records that we were activation-launched (see startedByActivation()).
   argc = dbus::consumeActivationFlag(argc, argv);
+
+  // Snapshot whether the user passed any CLI args NOW — before QApplication's
+  // ctor strips its own options from argv. Drives the `gtk-single-instance`
+  // detect heuristic (see resolveSingleInstance).
+  const bool had_cli_args = argc > 1;
 
   // Set the env BEFORE Qt's QApplication ctor (which can probe
   // GL/Vulkan via QPA) and before the CLI action path (since
@@ -285,16 +315,20 @@ int main(int argc, char **argv) {
   // launch forwards its intent to the running instance and exits instead of
   // spawning a duplicate. Honors `gtk-single-instance` just like GTK.
   bool selfOpenInitialWindow = true;
-  if (resolveSingleInstance(argc)) {
+  if (resolveSingleInstance(had_cli_args)) {
     switch (dbus::acquire(buildLaunchIntent(argc, argv))) {
       case dbus::Role::Secondary:
         // Already forwarded to the primary; nothing more to do.
         return 0;
       case dbus::Role::Primary:
-        // When started BY activation, the launcher delivers exactly one
-        // Activate/Open call that opens the first window — so don't also
-        // self-open here (that would double up). Mirrors GApplication only
-        // emitting `activate` once. A direct/Exec launch self-opens below.
+        // When started BY activation, don't self-open here (that would double
+        // up): per the org.freedesktop.Application contract the activating
+        // launcher delivers exactly one activation message for this launch —
+        // Activate when there are no files, or Open when there are — and our
+        // handler opens the first window in response. This mirrors
+        // GApplication emitting `activate` once; unlike GApplication we rely
+        // on the launcher honoring that one-message contract rather than
+        // coalescing internally. A direct/Exec launch self-opens below.
         if (dbus::startedByActivation()) selfOpenInitialWindow = false;
         break;
       case dbus::Role::Standalone:
