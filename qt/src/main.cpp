@@ -277,8 +277,8 @@ int main(int argc, char **argv) {
   // qt/src/dbus/Activation.h.
   QGuiApplication::setDesktopFileName(QString::fromLatin1(dbus::kAppId));
 
-  // The window icon, embedded so it works even running from the build
-  // tree (when ghastty.desktop / the icon theme are not yet installed).
+  // The window icon, embedded so it works even running from the build tree
+  // (when the desktop entry / icon theme are not yet installed).
   QGuiApplication::setWindowIcon(QIcon(QStringLiteral(":/ghastty.svg")));
 
   // We keep the user's system widget style rather than forcing Fusion.

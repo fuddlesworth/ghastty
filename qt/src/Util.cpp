@@ -7,6 +7,8 @@
 #include <QStringLiteral>
 #include <QVariantMap>
 
+#include "dbus/Activation.h"
+
 // We index libghostty's GHOSTTY_KEY_DIGIT_0..9 and GHOSTTY_KEY_A..Z
 // enum ranges by arithmetic offset. If libghostty ever inserts an
 // entry into either range the math goes wrong silently — pin the
@@ -43,15 +45,19 @@ void postNotification(const QString &title, const QString &body) {
       QStringLiteral("/org/freedesktop/Notifications"),
       QStringLiteral("org.freedesktop.Notifications"),
       QStringLiteral("Notify"));
+  // app_icon is an icon-theme name; it must match the installed icon, which is
+  // named after the app id (com.ghastty.ghastty.svg). Derive it from
+  // dbus::kAppId — the single source of truth — so a bare "ghastty" doesn't go
+  // stale and leave notifications icon-less.
   msg.setArguments({
-      QStringLiteral("Ghastty"),             // app_name
-      uint(0),                               // replaces_id
-      QStringLiteral("ghastty"),             // app_icon
-      title,                                 // summary
-      body,                                  // body
-      QStringList(),                         // actions
-      QVariantMap(),                         // hints
-      -1,                                    // expire_timeout (default)
+      QStringLiteral("Ghastty"),          // app_name
+      uint(0),                            // replaces_id
+      QString::fromLatin1(dbus::kAppId),  // app_icon
+      title,                              // summary
+      body,                               // body
+      QStringList(),                      // actions
+      QVariantMap(),                      // hints
+      -1,                                 // expire_timeout (default)
   });
   QDBusConnection::sessionBus().send(msg);  // fire-and-forget
 }

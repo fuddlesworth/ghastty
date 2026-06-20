@@ -16,6 +16,7 @@
 
 #include "../app/GhosttyApp.h"
 #include "../config/Config.h"
+#include "../dbus/Activation.h"
 #include "../GhosttySurface.h"
 #include "../MainWindow.h"
 #include "../Util.h"
@@ -23,7 +24,10 @@
 namespace actions {
 
 // Drive the taskbar progress bar via the Unity LauncherEntry D-Bus API
-// (honored by the KDE task manager), keyed to ghastty.desktop.
+// (honored by the KDE task manager), keyed to our installed desktop entry
+// (com.ghastty.ghastty.desktop). The application:// URI MUST match that
+// basename or the task manager can't associate the progress update, so it is
+// derived from dbus::kAppId — the single source of truth for the app id.
 //
 // Unity LauncherEntry does not have first-class ERROR / PAUSE /
 // INDETERMINATE states. We approximate per progress-style:
@@ -50,8 +54,10 @@ static void postProgress(ghostty_action_progress_report_state_e state,
       state == GHOSTTY_PROGRESS_STATE_PAUSE) {
     props[QStringLiteral("urgent")] = true;
   }
-  msg.setArguments(
-      {QStringLiteral("application://ghastty.desktop"), QVariant(props)});
+  const QString appUri = QStringLiteral("application://") +
+                         QString::fromLatin1(dbus::kAppId) +
+                         QStringLiteral(".desktop");
+  msg.setArguments({appUri, QVariant(props)});
   QDBusConnection::sessionBus().send(msg);
 }
 
