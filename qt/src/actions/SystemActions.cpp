@@ -41,9 +41,16 @@ namespace actions {
 //     dropping the state entirely.
 static void postProgress(ghostty_action_progress_report_state_e state,
                          double fraction) {
+  // The LauncherEntry object path is a free-form per-app token (matching is
+  // done via the application:// URI below, not the path). Derive it from the
+  // app id anyway — with the dots D-Bus paths disallow turned into '_' — so it
+  // stays consistent with dbus::kAppId, the single source of truth.
+  const QString objectPath =
+      QStringLiteral("/com/canonical/unity/launcherentry/") +
+      QString::fromLatin1(dbus::kAppId).replace(QLatin1Char('.'),
+                                                QLatin1Char('_'));
   QDBusMessage msg = QDBusMessage::createSignal(
-      QStringLiteral("/com/canonical/unity/launcherentry/ghastty"),
-      QStringLiteral("com.canonical.Unity.LauncherEntry"),
+      objectPath, QStringLiteral("com.canonical.Unity.LauncherEntry"),
       QStringLiteral("Update"));
   QVariantMap props;
   const bool visible = state != GHOSTTY_PROGRESS_STATE_REMOVE;
