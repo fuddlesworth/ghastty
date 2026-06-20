@@ -951,7 +951,8 @@ void MainWindow::changeEvent(QEvent *e) {
   // and repaints standard widgets automatically, but chrome that caches or
   // overrides palette-derived colours must re-derive explicitly so the window
   // recolours instantly — no config reload or restart. (PaletteChange would
-  // recurse with our setPalette() below; ApplicationPaletteChange does not.)
+  // recurse with the m_tabs->setPalette() in refreshBackdrop();
+  // ApplicationPaletteChange does not.)
   if (e->type() == QEvent::ApplicationPaletteChange && m_tabs) {
     invalidateBellAttentionIcon();  // re-tint the bell dot from the new accent
     refreshBackdrop();              // tab-strip backdrop = QPalette::Window
