@@ -896,13 +896,15 @@ void GhosttySurface::updateScrollbar(uint64_t total, uint64_t offset,
 // Reveal the overlay scrollbar (it fades itself back out when idle).
 void GhosttySurface::flashScrollbar() {
   if (!m_scrollbar || !scrollbarAllowed()) return;
-  // Handle colour: light on a dark terminal, dark on a light one.
-  ghostty_config_color_s bg{};
-  if (config::get(&bg, "background")) {
-    const double luma = 0.299 * bg.r + 0.587 * bg.g + 0.114 * bg.b;
-    m_scrollbar->setHandleColor(luma < 128.0 ? QColor(235, 235, 235)
-                                             : QColor(45, 45, 45));
-  }
+  // The handle floats over the terminal, so it follows the terminal's own
+  // foreground colour (which is designed to contrast the background) rather
+  // than a fixed grey — light handle on a dark terminal, dark on a light one,
+  // without hardcoding. The scrollbar applies its own fade alpha, so pass the
+  // opaque colour. `foreground` is a defaulted config field, so this normally
+  // succeeds; if it ever fails the handle keeps its previous colour.
+  ghostty_config_color_s fg{};
+  if (config::get(&fg, "foreground"))
+    m_scrollbar->setHandleColor(QColor(fg.r, fg.g, fg.b));
   layoutScrollbar();
   m_scrollbar->reveal();
 }
@@ -1110,10 +1112,16 @@ void GhosttySurface::paintEvent(QPaintEvent *) {
     }
   }
 
-  // Bell `border` feature: a brief attention flash over the terminal.
+  // Bell `border` feature: a brief attention flash over the terminal. Use the
+  // system accent (QPalette::Highlight) to match the tab bell-attention dot,
+  // with the same warm fallback when the theme's highlight is near-black.
+  // Read in paintEvent, so it tracks the KDE colour scheme live.
   if (m_bellFlash) {
+    QColor accent = palette().color(QPalette::Highlight);
+    if (accent.lightness() < 40) accent = QColor(0xff, 0x9f, 0x1c);
+    accent.setAlpha(230);
     painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
-    painter.setPen(QPen(QColor(255, 96, 96, 230), 3));
+    painter.setPen(QPen(accent, 3));
     painter.setBrush(Qt::NoBrush);
     painter.drawRect(QRectF(rect()).adjusted(1.5, 1.5, -1.5, -1.5));
   }
