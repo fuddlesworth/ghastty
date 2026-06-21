@@ -256,6 +256,9 @@ protected:
   void paintEvent(QPaintEvent *) override;
   void resizeEvent(QResizeEvent *) override;
   void moveEvent(QMoveEvent *) override;
+  // Re-theme the floating overlays when the KDE colour scheme changes
+  // (QEvent::ApplicationPaletteChange).
+  void changeEvent(QEvent *) override;
 
   // Disable Qt's Tab/Backtab focus traversal so those keys reach
   // keyPressEvent and can be forwarded to the terminal.
@@ -288,6 +291,7 @@ private:
   bool scrollbarAllowed() const;   // false when `scrollbar = never`
   void flashScrollbar();           // reveal the overlay scrollbar, arm hide
   void buildExitOverlay(int exitCode);
+  void restyleOverlays();          // re-theme floating overlays from the palette
   void showResizeOverlay();        // transient grid-size overlay on resize
   void paintResizeOverlay(QPainter &painter);  // draws ^ in paintEvent
   void layoutSearchBar();          // position the search bar at the top edge
