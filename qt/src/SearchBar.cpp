@@ -118,12 +118,13 @@ void SearchBar::refreshCounterColor() {
   m_count->setPalette(pal);
 }
 
-void SearchBar::changeEvent(QEvent *event) {
-  // KDE colour-scheme switch (delivered app-wide as ApplicationPaletteChange):
-  // the frame/field/buttons follow the new palette automatically; only the
-  // counter's explicit colour override needs re-deriving.
+bool SearchBar::event(QEvent *event) {
+  // A KDE colour-scheme switch is delivered as QEvent::ApplicationPaletteChange
+  // via event(), not changeEvent(). The frame/field/buttons follow the new
+  // palette automatically; only the counter's explicit colour override needs
+  // re-deriving.
   if (event->type() == QEvent::ApplicationPaletteChange) refreshCounterColor();
-  QFrame::changeEvent(event);
+  return QFrame::event(event);
 }
 
 void SearchBar::updateCount() {

@@ -256,9 +256,6 @@ protected:
   void paintEvent(QPaintEvent *) override;
   void resizeEvent(QResizeEvent *) override;
   void moveEvent(QMoveEvent *) override;
-  // Re-theme the floating overlays when the KDE colour scheme changes
-  // (QEvent::ApplicationPaletteChange).
-  void changeEvent(QEvent *) override;
 
   // Disable Qt's Tab/Backtab focus traversal so those keys reach
   // keyPressEvent and can be forwarded to the terminal.

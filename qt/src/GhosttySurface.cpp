@@ -850,6 +850,13 @@ bool GhosttySurface::event(QEvent *e) {
       m_compositorCv.notify_all();
     }
   }
+
+  // A KDE colour-scheme change is delivered as QEvent::ApplicationPaletteChange
+  // here in event() — Qt does NOT route it to changeEvent() (that only sees the
+  // per-widget PaletteChange). Re-theme the stylesheet-based overlays, which
+  // don't follow the palette on their own.
+  if (e->type() == QEvent::ApplicationPaletteChange) restyleOverlays();
+
   return QWidget::event(e);
 }
 
@@ -1478,15 +1485,6 @@ void GhosttySurface::restyleOverlays() {
   if (m_exitOverlay)
     m_exitOverlay->setStyleSheet(overlayStyleSheet(pal, 14, false, false));
   update();  // repaint the painted resize overlay with the new palette
-}
-
-void GhosttySurface::changeEvent(QEvent *e) {
-  // A KDE colour-scheme change arrives app-wide as ApplicationPaletteChange;
-  // re-theme the stylesheet-based overlays (which don't auto-follow). Keying on
-  // ApplicationPaletteChange (not PaletteChange) avoids recursing with the
-  // setStyleSheet() calls in restyleOverlays.
-  if (e->type() == QEvent::ApplicationPaletteChange) restyleOverlays();
-  QWidget::changeEvent(e);
 }
 
 // libghostty's renderer outputs premultiplied alpha — except a custom
