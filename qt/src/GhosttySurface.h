@@ -288,6 +288,7 @@ private:
   bool scrollbarAllowed() const;   // false when `scrollbar = never`
   void flashScrollbar();           // reveal the overlay scrollbar, arm hide
   void buildExitOverlay(int exitCode);
+  void restyleOverlays();          // re-theme floating overlays from the palette
   void showResizeOverlay();        // transient grid-size overlay on resize
   void paintResizeOverlay(QPainter &painter);  // draws ^ in paintEvent
   void layoutSearchBar();          // position the search bar at the top edge

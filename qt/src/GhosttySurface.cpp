@@ -64,6 +64,7 @@
 #include <QOpenGLShaderProgram>
 #include <QOpenGLVertexArrayObject>
 #include <QPainter>
+#include <QPalette>
 #include <QMoveEvent>
 #include <QResizeEvent>
 #include <QSplitter>
@@ -849,7 +850,18 @@ bool GhosttySurface::event(QEvent *e) {
       m_compositorCv.notify_all();
     }
   }
-  return QWidget::event(e);
+
+  // A KDE colour-scheme change is delivered as QEvent::ApplicationPaletteChange
+  // here in event() — Qt does NOT route it to changeEvent() (that only sees the
+  // per-widget PaletteChange). Re-theme the stylesheet-based overlays, which
+  // don't follow the palette on their own. Restyle AFTER QWidget::event(): it
+  // re-resolves this widget's palette to the new scheme there, and
+  // restyleOverlays() reads palette() — running before it would bake in the
+  // stale colours.
+  const bool paletteChanged = e->type() == QEvent::ApplicationPaletteChange;
+  const bool handled = QWidget::event(e);
+  if (paletteChanged) restyleOverlays();
+  return handled;
 }
 
 void GhosttySurface::renderIfDirty() {
@@ -895,13 +907,15 @@ void GhosttySurface::updateScrollbar(uint64_t total, uint64_t offset,
 // Reveal the overlay scrollbar (it fades itself back out when idle).
 void GhosttySurface::flashScrollbar() {
   if (!m_scrollbar || !scrollbarAllowed()) return;
-  // Handle colour: light on a dark terminal, dark on a light one.
-  ghostty_config_color_s bg{};
-  if (config::get(&bg, "background")) {
-    const double luma = 0.299 * bg.r + 0.587 * bg.g + 0.114 * bg.b;
-    m_scrollbar->setHandleColor(luma < 128.0 ? QColor(235, 235, 235)
-                                             : QColor(45, 45, 45));
-  }
+  // The handle floats over the terminal, so it follows the terminal's own
+  // foreground colour (which is designed to contrast the background) rather
+  // than a fixed grey — light handle on a dark terminal, dark on a light one,
+  // without hardcoding. The scrollbar applies its own fade alpha, so pass the
+  // opaque colour. `foreground` is a defaulted config field, so this normally
+  // succeeds; if it ever fails the handle keeps its previous colour.
+  ghostty_config_color_s fg{};
+  if (config::get(&fg, "foreground"))
+    m_scrollbar->setHandleColor(QColor(fg.r, fg.g, fg.b));
   layoutScrollbar();
   m_scrollbar->reveal();
 }
@@ -1109,10 +1123,16 @@ void GhosttySurface::paintEvent(QPaintEvent *) {
     }
   }
 
-  // Bell `border` feature: a brief attention flash over the terminal.
+  // Bell `border` feature: a brief attention flash over the terminal. Use the
+  // system accent (QPalette::Highlight) to match the tab bell-attention dot,
+  // with the same warm fallback when the theme's highlight is near-black.
+  // Read in paintEvent, so it tracks the KDE colour scheme live.
   if (m_bellFlash) {
+    QColor accent = palette().color(QPalette::Highlight);
+    if (accent.lightness() < 40) accent = QColor(0xff, 0x9f, 0x1c);
+    accent.setAlpha(230);
     painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
-    painter.setPen(QPen(QColor(255, 96, 96, 230), 3));
+    painter.setPen(QPen(accent, 3));
     painter.setBrush(Qt::NoBrush);
     painter.drawRect(QRectF(rect()).adjusted(1.5, 1.5, -1.5, -1.5));
   }
@@ -1141,13 +1161,50 @@ void GhosttySurface::setMouseVisible(bool visible) {
   setCursor(visible ? m_cursorShape : Qt::BlankCursor);
 }
 
-// A small translucent overlay label (key-sequence / resize display).
+// Linear blend of two colours (t=0 → a, t=1 → b).
+static QColor blendColor(const QColor &a, const QColor &b, double t) {
+  return QColor::fromRgbF(a.redF() * (1 - t) + b.redF() * t,
+                          a.greenF() * (1 - t) + b.greenF() * t,
+                          a.blueF() * (1 - t) + b.blueF() * t);
+}
+
+// Stylesheet for a translucent overlay pill/banner that floats over the
+// terminal. Colours come from the palette's ToolTip role — the standard
+// "floating info over content" colour — so the overlays track the KDE colour
+// scheme and recolour live (see restyleOverlays) instead of using hardcoded
+// greys. `pill` adds the rounded, padded chrome (banners omit it); `error`
+// forces a red accent so the renderer-health warning still reads as an alarm
+// on any theme.
+static QString overlayStyleSheet(const QPalette &pal, int fontPx, bool pill,
+                                 bool error) {
+  QColor bg = pal.color(QPalette::ToolTipBase);
+  QColor fg = pal.color(QPalette::ToolTipText);
+  double alpha = 0.78;
+  if (error) {
+    // Blend the themed tooltip base heavily toward a semantic alarm red so it
+    // still picks up some of the active scheme while reading as an error.
+    bg = blendColor(bg, QColor(0xb4, 0x1e, 0x1e), 0.80);
+    fg = QColor(0xff, 0xff, 0xff);  // white stays legible on the red
+    alpha = 0.85;
+  }
+  QString css = QStringLiteral(
+                    "background: rgba(%1,%2,%3,%4); color: %5; font-size: %6px;")
+                    .arg(bg.red())
+                    .arg(bg.green())
+                    .arg(bg.blue())
+                    .arg(alpha, 0, 'f', 2)
+                    .arg(fg.name())
+                    .arg(fontPx);
+  if (pill) css += QStringLiteral(" padding: 4px 10px; border-radius: 4px;");
+  return css;
+}
+
+// A small translucent overlay label (key-sequence / link display).
 static QLabel *makeOverlayLabel(QWidget *parent) {
   auto *label = new QLabel(parent);
   label->setAttribute(Qt::WA_TransparentForMouseEvents);
-  label->setStyleSheet(QStringLiteral(
-      "background: rgba(0,0,0,0.75); color: #f0f0f0; font-size: 13px;"
-      "padding: 4px 10px; border-radius: 4px;"));
+  label->setStyleSheet(overlayStyleSheet(parent->palette(), 13, /*pill=*/true,
+                                          /*error=*/false));
   label->hide();
   return label;
 }
@@ -1224,9 +1281,8 @@ void GhosttySurface::setRendererHealth(bool unhealthy) {
     // it doesn't fight them when both are visible at once.
     m_healthOverlay = new QLabel(this);
     m_healthOverlay->setAttribute(Qt::WA_TransparentForMouseEvents);
-    m_healthOverlay->setStyleSheet(QStringLiteral(
-        "background: rgba(180,30,30,0.85); color: #ffffff;"
-        "font-size: 12px; padding: 4px 10px; border-radius: 4px;"));
+    m_healthOverlay->setStyleSheet(
+        overlayStyleSheet(palette(), 12, /*pill=*/true, /*error=*/true));
   }
   m_healthOverlay->setText(QStringLiteral("renderer unhealthy"));
   m_healthOverlay->adjustSize();
@@ -1374,10 +1430,14 @@ void GhosttySurface::paintResizeOverlay(QPainter &painter) {
   painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
   painter.setRenderHint(QPainter::Antialiasing, true);
   painter.setPen(Qt::NoPen);
-  painter.setBrush(QColor(0, 0, 0, 191));  // rgba(0,0,0,0.75)
+  // Themed like the label-based overlays (ToolTip role, translucent); painted
+  // each frame, so it re-reads the palette and follows the KDE scheme.
+  QColor fill = palette().color(QPalette::ToolTipBase);
+  fill.setAlphaF(0.78);
+  painter.setBrush(fill);
   painter.drawRoundedRect(box, 4, 4);
   painter.setFont(f);
-  painter.setPen(QColor(0xf0, 0xf0, 0xf0));
+  painter.setPen(palette().color(QPalette::ToolTipText));
   painter.drawText(box, Qt::AlignCenter, m_resizeOverlayText);
 }
 
@@ -1403,8 +1463,8 @@ void GhosttySurface::buildExitOverlay(int exitCode) {
   m_exitOverlay->setAlignment(Qt::AlignCenter);
   m_exitOverlay->setWordWrap(true);
   m_exitOverlay->setAttribute(Qt::WA_TransparentForMouseEvents);
-  m_exitOverlay->setStyleSheet(QStringLiteral(
-      "background: rgba(0,0,0,0.65); color: #e0e0e0; font-size: 14px;"));
+  m_exitOverlay->setStyleSheet(
+      overlayStyleSheet(palette(), 14, /*pill=*/false, /*error=*/false));
   const QString code = exitCode >= 0
                            ? QStringLiteral(" (code %1)").arg(exitCode)
                            : QString();
@@ -1413,6 +1473,22 @@ void GhosttySurface::buildExitOverlay(int exitCode) {
   m_exitOverlay->setGeometry(rect());
   m_exitOverlay->show();
   m_exitOverlay->raise();
+}
+
+// Re-theme every floating overlay from the current palette. Stylesheets do not
+// follow palette changes on their own, so re-apply them; the painted resize
+// overlay re-reads the palette on its next frame, so a repaint suffices.
+void GhosttySurface::restyleOverlays() {
+  const QPalette &pal = palette();
+  if (m_keySeqOverlay)
+    m_keySeqOverlay->setStyleSheet(overlayStyleSheet(pal, 13, true, false));
+  if (m_linkOverlay)
+    m_linkOverlay->setStyleSheet(overlayStyleSheet(pal, 13, true, false));
+  if (m_healthOverlay)
+    m_healthOverlay->setStyleSheet(overlayStyleSheet(pal, 12, true, true));
+  if (m_exitOverlay)
+    m_exitOverlay->setStyleSheet(overlayStyleSheet(pal, 14, false, false));
+  update();  // repaint the painted resize overlay with the new palette
 }
 
 // libghostty's renderer outputs premultiplied alpha — except a custom
