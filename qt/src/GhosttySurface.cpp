@@ -854,10 +854,14 @@ bool GhosttySurface::event(QEvent *e) {
   // A KDE colour-scheme change is delivered as QEvent::ApplicationPaletteChange
   // here in event() — Qt does NOT route it to changeEvent() (that only sees the
   // per-widget PaletteChange). Re-theme the stylesheet-based overlays, which
-  // don't follow the palette on their own.
-  if (e->type() == QEvent::ApplicationPaletteChange) restyleOverlays();
-
-  return QWidget::event(e);
+  // don't follow the palette on their own. Restyle AFTER QWidget::event(): it
+  // re-resolves this widget's palette to the new scheme there, and
+  // restyleOverlays() reads palette() — running before it would bake in the
+  // stale colours.
+  const bool paletteChanged = e->type() == QEvent::ApplicationPaletteChange;
+  const bool handled = QWidget::event(e);
+  if (paletteChanged) restyleOverlays();
+  return handled;
 }
 
 void GhosttySurface::renderIfDirty() {
