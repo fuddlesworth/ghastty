@@ -1063,6 +1063,17 @@ void GhosttySurface::paintEvent(QPaintEvent *) {
       // Real frame attached: fill transparent so the subsurface
       // shows through; chrome painted afterwards composites on top.
       painter.fillRect(rect(), Qt::transparent);
+    } else if (!m_image.isNull()) {
+      // Legacy CPU-copy path: the renderer is in `.legacy_copy` mode
+      // (image_backed=0 — e.g. NVIDIA exports a VkBuffer, not an image-
+      // backed dmabuf), so the subsurface is never fed and drainVulkan
+      // stamped the frame into m_image instead. Blit it 1:1 (m_image
+      // carries its device pixel ratio, so the QPointF overload draws it
+      // at its true logical size). Without this the Vulkan branch only
+      // ever filled the bg placeholder → black terminal on such GPUs.
+      // m_image stays null on the direct path, so this can never ghost
+      // over a live subsurface.
+      painter.drawImage(QPointF(0, 0), m_image);
     } else {
       // Either the subsurface presenter hasn't been created yet
       // (new-tab paintEvent fires before Show creates it) or no
@@ -2496,6 +2507,29 @@ void GhosttySurface::drainVulkan() {
     if (parked >= 0) ::close(parked);
     return;
   }
+
+  // Legacy CPU-copy frame: the renderer is in `.legacy_copy` mode
+  // (image_backed=0 — e.g. NVIDIA exports a VkBuffer, not an image-backed
+  // dmabuf), so presentVulkanDmabuf stamped a QImage into m_pending rather
+  // than parking a dmabuf. Drain it to m_image for paintEvent FIRST, even
+  // when a SubsurfacePresenter exists (it does on KWin Wayland) — the
+  // presenter is up but unused on such GPUs, and the subsurface branch
+  // below would otherwise see no parked dmabuf and drop the QImage,
+  // leaving the terminal black. The direct path never populates m_pending
+  // (it parks m_pendingDmabuf instead), so this never steals its frames.
+  {
+    QImage qframe;
+    {
+      QMutexLocker lock(&m_pendingMutex);
+      qframe = std::move(m_pending);
+    }
+    if (!qframe.isNull()) {
+      m_image = std::move(qframe);
+      update();
+      return;
+    }
+  }
+
   if (m_useSubsurface.load(std::memory_order_acquire) &&
       m_subsurfacePresenter) {
     // No gate check here: the renderer thread's wait in
@@ -2574,16 +2608,7 @@ void GhosttySurface::drainVulkan() {
     ::close(frame.fd);
     return;
   }
-
-  // Fallback: hand the QImage to paintEvent.
-  QImage frame;
-  {
-    QMutexLocker lock(&m_pendingMutex);
-    if (m_pending.isNull()) return;
-    frame = std::move(m_pending);
-  }
-  m_image = std::move(frame);
-  update();
+  // Any legacy QImage was already drained above; nothing else to do.
 }
 
 bool GhosttySurface::forceParentCommit() {
