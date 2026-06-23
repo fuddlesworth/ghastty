@@ -294,8 +294,11 @@ private:
   void layoutSearchBar();          // position the search bar at the top edge
   void sendKey(QKeyEvent *, ghostty_input_action_e action);
   void commitText(const QString &text);
-  void sendMouseButton(QMouseEvent *, ghostty_input_mouse_state_e state);
-  bool rightClickOpensMenu(QMouseEvent *ev) const;
+  // Forward a mouse button to libghostty. Returns true if the core
+  // consumed it (a mouse-capturing program took the event). The return
+  // already accounts for shift-bypass + mouse-shift-capture, so the
+  // right-click context menu keys off it (see contextMenuEvent).
+  bool sendMouseButton(QMouseEvent *, ghostty_input_mouse_state_e state);
 
   // The keybind currently bound to `action` (for context-menu hints),
   // or an empty sequence if none / not displayable.
@@ -481,6 +484,12 @@ private:
   // also reported to the running program. macOS + GTK do the same
   // (suppressNextLeftMouseUp / suppress_left_mouse_release).
   bool m_suppressNextLeftRelease = false;
+  // Whether the most recent right-button press was consumed by a
+  // mouse-capturing program (the return of sendMouseButton). The
+  // mouse-triggered context menu opens only when it was NOT consumed —
+  // so Shift+right-click (which the core lets bypass mouse reporting)
+  // reaches the menu even while a TUI has the mouse grabbed.
+  bool m_rightPressConsumed = false;
   // Last requested cursor shape (from MOUSE_SHAPE) and visibility
   // (from MOUSE_VISIBILITY). Tracked separately so toggling
   // visibility doesn't reset the shape.

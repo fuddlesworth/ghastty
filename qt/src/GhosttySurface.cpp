@@ -1632,9 +1632,9 @@ void GhosttySurface::sendKey(QKeyEvent *ev, ghostty_input_action_e action) {
   ghostty_surface_key(m_surface, k);
 }
 
-void GhosttySurface::sendMouseButton(QMouseEvent *ev,
+bool GhosttySurface::sendMouseButton(QMouseEvent *ev,
                                      ghostty_input_mouse_state_e state) {
-  if (!m_surface) return;
+  if (!m_surface) return false;
   ghostty_input_mouse_button_e button;
   switch (ev->button()) {
     case Qt::LeftButton: button = GHOSTTY_MOUSE_LEFT; break;
@@ -1654,8 +1654,8 @@ void GhosttySurface::sendMouseButton(QMouseEvent *ev,
     case Qt::ExtraButton8: button = GHOSTTY_MOUSE_ELEVEN; break;
     default: button = GHOSTTY_MOUSE_UNKNOWN; break;
   }
-  ghostty_surface_mouse_button(m_surface, state, button,
-                               translateMods(ev->modifiers()));
+  return ghostty_surface_mouse_button(m_surface, state, button,
+                                      translateMods(ev->modifiers()));
 }
 
 void GhosttySurface::keyPressEvent(QKeyEvent *ev) {
@@ -1673,15 +1673,6 @@ void GhosttySurface::keyReleaseEvent(QKeyEvent *ev) {
   // Qt synthesizes a release before each auto-repeat press; drop those.
   if (ev->isAutoRepeat()) return;
   sendKey(ev, GHOSTTY_ACTION_RELEASE);
-}
-
-// A right-click opens the context menu (contextMenuEvent) unless the
-// running program is capturing the mouse, in which case it gets the
-// click. Returns true if the click was for the menu and should not be
-// forwarded to the terminal.
-bool GhosttySurface::rightClickOpensMenu(QMouseEvent *ev) const {
-  return ev->button() == Qt::RightButton && m_surface &&
-         !ghostty_surface_mouse_captured(m_surface);
 }
 
 void GhosttySurface::mousePressEvent(QMouseEvent *ev) {
@@ -1703,8 +1694,10 @@ void GhosttySurface::mousePressEvent(QMouseEvent *ev) {
   // open the context menu. macOS + GTK both do this so the core can
   // word-select on right-press and then we open the menu over the
   // selection. If the running program is mouse-captured, the press
-  // is forwarded as a real button event.
-  sendMouseButton(ev, GHOSTTY_MOUSE_PRESS);
+  // is forwarded as a real button event and the core reports it
+  // consumed — gating the context menu (see contextMenuEvent).
+  const bool consumed = sendMouseButton(ev, GHOSTTY_MOUSE_PRESS);
+  if (ev->button() == Qt::RightButton) m_rightPressConsumed = consumed;
 }
 
 void GhosttySurface::mouseReleaseEvent(QMouseEvent *ev) {
@@ -1737,10 +1730,17 @@ QKeySequence GhosttySurface::shortcutFor(const char *action) const {
 }
 
 void GhosttySurface::contextMenuEvent(QContextMenuEvent *ev) {
-  // Let a mouse-capturing program have the right-click; also suppress
-  // the menu while the child-exited overlay is up.
-  if (!m_surface || m_exitOverlay ||
-      ghostty_surface_mouse_captured(m_surface))
+  // Suppress the menu while the child-exited overlay is up.
+  if (!m_surface || m_exitOverlay) return;
+
+  // For a mouse-triggered menu, defer to whether the core consumed the
+  // right-press: a mouse-capturing program (e.g. a TUI) consumes it and
+  // gets the click, but Shift+right-click bypasses mouse reporting in the
+  // core (honoring mouse-shift-capture), comes back not-consumed, and
+  // reaches the menu. This mirrors the GTK apprt, which opens the menu
+  // exactly when mouseButtonCallback returns false. A keyboard-triggered
+  // menu (Menu key) has no preceding press and always opens.
+  if (ev->reason() == QContextMenuEvent::Mouse && m_rightPressConsumed)
     return;
 
   QMenu menu(this);
