@@ -13,11 +13,49 @@
 #include <QVariant>
 #include <QVariantList>
 
+#include "dbus/Activation.h"  // dbus::kAppId
+
 namespace {
 constexpr const char *kService = "org.freedesktop.portal.Desktop";
 constexpr const char *kPath = "/org/freedesktop/portal/desktop";
 constexpr const char *kInterface = "org.freedesktop.portal.GlobalShortcuts";
 constexpr const char *kRequest = "org.freedesktop.portal.Request";
+
+// The host-portal Registry: how an unsandboxed (non-Flatpak) app declares its
+// app id to xdg-desktop-portal. Portals that key on caller identity — the
+// GlobalShortcuts portal among them — reject calls from a connection with no
+// associated app id ("An app id is required").
+constexpr const char *kRegistryPath = "/org/freedesktop/host/portal/registry";
+constexpr const char *kRegistryInterface =
+    "org.freedesktop.host.portal.Registry";
+
+// Associate this D-Bus connection with our app id via the host-portal Registry,
+// blocking until the association is in place (or a short timeout elapses).
+//
+// Qt's QPA does this too, but lazily — after we construct (see main.cpp, where
+// GlobalShortcuts is built before the event loop spins). That ordering is why
+// the very first CreateSession below was rejected with "An app id is required":
+// the connection had no identity yet. Doing it ourselves, synchronously, up
+// front removes the race. An "already associated" error means someone (Qt, or a
+// prior call) beat us to it — that is exactly the state we need, so it is not a
+// failure.
+void registerHostAppId() {
+  QDBusMessage msg = QDBusMessage::createMethodCall(
+      QString::fromLatin1(kService), QString::fromLatin1(kRegistryPath),
+      QString::fromLatin1(kRegistryInterface), QStringLiteral("Register"));
+  msg.setArguments(
+      {QString::fromLatin1(dbus::kAppId), QVariant::fromValue(QVariantMap{})});
+  // Block: the CreateSession that immediately follows depends on this. A short
+  // timeout keeps a wedged portal from stalling startup.
+  const QDBusMessage reply =
+      QDBusConnection::sessionBus().call(msg, QDBus::Block, 2000);
+  if (reply.type() == QDBusMessage::ErrorMessage &&
+      !reply.errorMessage().contains(QStringLiteral("already associated"),
+                                     Qt::CaseInsensitive)) {
+    std::fprintf(stderr, "[ghastty] host-portal Register failed: %s\n",
+                 reply.errorMessage().toUtf8().constData());
+  }
+}
 }  // namespace
 
 // One declared shortcut, marshalled as the portal's `(sa{sv})`.
@@ -54,6 +92,10 @@ GlobalShortcuts::GlobalShortcuts(QObject *parent) : QObject(parent) {
   bus.connect(QString::fromLatin1(kService), QString::fromLatin1(kPath),
               QString::fromLatin1(kInterface), QStringLiteral("Activated"),
               this, SLOT(onActivated(QDBusMessage)));
+
+  // Declare our app id to the portal before any identity-keyed call. Without
+  // this the CreateSession below is rejected with "An app id is required".
+  registerHostAppId();
 
   // Create a portal session; shortcut binding follows in its response.
   QVariantMap options;

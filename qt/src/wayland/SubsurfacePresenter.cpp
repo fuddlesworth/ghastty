@@ -12,6 +12,7 @@
 
 #include <QGuiApplication>
 #include <QLatin1String>
+#include <QScopeGuard>
 #include <QWindow>
 #include <qpa/qplatformnativeinterface.h>
 
@@ -221,20 +222,26 @@ wl_display *acquireWaylandDisplay() {
 }
 
 // wl_buffer::release listener: the compositor is done sampling the
-// buffer for any committed surface state. We KEEP the wl_buffer
-// alive across releases — libghostty re-uses the same dmabuf fd
-// across frames until resize, so we re-attach the cached wl_buffer
-// on every present (see `m_cachedBuffer` in the header). The buffer
-// is destroyed only when (a) the dmabuf shape changes (next
-// `presentDmabuf` invalidates the cache) or (b) the presenter is
-// destroyed.
+// buffer for any committed surface state, so libghostty's renderer is
+// free to draw into the underlying dma-buf again. We KEEP the wl_buffer
+// alive across releases — each Target's wl_buffer is cached by inode in
+// m_buffers and re-attached when the double-buffer rotation cycles back
+// to it. Buffers are destroyed only when (a) a resize retires the
+// Target generation (presentDmabuf purges the stale-shape entries) or
+// (b) the presenter is destroyed.
 //
-// The underlying dmabuf memory is owned by libghostty; we never
-// close that fd here (the SCM_RIGHTS transfer in
-// zwp_linux_buffer_params.add gave the compositor its own
-// reference, which lives independently of our wl_buffer).
-void bufferRelease(void *, wl_buffer *) {
-  // No-op. See cache rationale above.
+// The underlying dma-buf memory is owned by libghostty; we never close
+// that fd here (the SCM_RIGHTS transfer in zwp_linux_buffer_params.add
+// gave the compositor its own reference, independent of our wl_buffer).
+//
+// Increment 2 acts on release to gate buffer reuse: route to the owning
+// presenter, which resolves the release-gate when the released buffer is
+// the one the most recent present replaced. A compositor holding a
+// buffer on a hardware plane therefore can never have it overwritten
+// mid-scanout — the renderer blocks (host side) until this fires.
+void bufferRelease(void *data, wl_buffer *buffer) {
+  if (auto *p = static_cast<wayland::SubsurfacePresenter *>(data))
+    p->onBufferReleased(buffer);
 }
 const wl_buffer_listener kBufferListener = {
     bufferRelease,
@@ -477,14 +484,20 @@ SubsurfacePresenter::~SubsurfacePresenter() {
     wl_callback_destroy(m_frameCallback);
     m_frameCallback = nullptr;
   }
-  // Destroy the cached wl_buffer BEFORE the child surface — the
-  // buffer may still be attached. wl_buffer_destroy is safe whether
-  // or not the compositor has released it (Wayland guarantees no
-  // further events on a destroyed proxy).
-  if (m_cachedBuffer) {
-    wl_buffer_destroy(m_cachedBuffer);
-    m_cachedBuffer = nullptr;
+  // Destroy all cached wl_buffers BEFORE the child surface — a buffer
+  // may still be attached. wl_buffer_destroy is safe whether or not the
+  // compositor has released it (Wayland guarantees no further events on
+  // a destroyed proxy).
+  for (auto &entry : m_buffers) {
+    if (entry.second.buffer) wl_buffer_destroy(entry.second.buffer);
   }
+  m_buffers.clear();
+  if (m_uncachedBuffer) {
+    wl_buffer_destroy(m_uncachedBuffer);
+    m_uncachedBuffer = nullptr;
+  }
+  m_lastPresentedBuffer = nullptr;
+  m_awaitingReleaseOf = nullptr;
   if (m_fractionalScale) wp_fractional_scale_v1_destroy(m_fractionalScale);
   if (m_viewport) wp_viewport_destroy(m_viewport);
   if (m_subsurface) wl_subsurface_destroy(m_subsurface);
@@ -508,11 +521,40 @@ void SubsurfacePresenter::onFrameCallbackDone(wl_callback *cb) {
   if (m_onFrameReady) m_onFrameReady();
 }
 
+void SubsurfacePresenter::onBufferReleased(wl_buffer *buffer) {
+  // Runs on the Qt GUI thread (Wayland event dispatch). Resolve the
+  // release-gate only for the buffer the most recent present replaced —
+  // ignoring releases of other (older) buffers makes the gate robust
+  // against release/commit timing skew: a stale release can never wake
+  // the renderer early to redraw a buffer still on screen.
+  if (buffer && buffer == m_awaitingReleaseOf) {
+    m_awaitingReleaseOf = nullptr;
+    if (m_onBufferReusable) m_onBufferReusable();
+  }
+}
+
 void SubsurfacePresenter::presentDmabuf(int fd, uint32_t drm_format,
                                         uint64_t drm_modifier, uint32_t width,
                                         uint32_t height, uint32_t stride,
                                         int dest_width, int dest_height,
                                         bool y_invert) {
+  // Release-gate bookkeeping. By default the gate (letting the renderer
+  // reuse a rotated-away dma-buf) opens when this call returns. If this
+  // present commits a frame that REPLACES an earlier on-screen buffer,
+  // we instead defer the gate to that buffer's wl_buffer.release (via
+  // m_awaitingReleaseOf) so the renderer can't redraw a buffer the
+  // compositor is still scanning out. On every early-return / dropped-
+  // frame / first-frame path the guard opens the gate now, so a parked
+  // renderer is never left waiting on a release that will not come.
+  // `replaced` (whatever buffer this commit supersedes) is captured just
+  // before the attach below, AFTER the stale-generation purge — so if a
+  // resize purged the old on-screen buffer, we don't end up waiting on a
+  // release for a buffer we already destroyed.
+  bool gate_deferred = false;
+  const auto gate = qScopeGuard([&] {
+    if (!gate_deferred && m_onBufferReusable) m_onBufferReusable();
+  });
+
   if (fd < 0 || !m_dmabuf || !m_childSurface || !m_viewport) return;
   if (dest_width <= 0) dest_width = 1;
   if (dest_height <= 0) dest_height = 1;
@@ -578,41 +620,43 @@ void SubsurfacePresenter::presentDmabuf(int fd, uint32_t drm_format,
     }
   }
 
-  // Wrap libghostty's borrowed fd in a wl_buffer. Cached across
-  // frames by (kernel inode, shape) — see m_cachedInode in the
-  // header for the full rationale. fstat the dmabuf fd to get the
-  // anon_inode that uniquely identifies the dma-buf object; it's
-  // stable across the dup that GhosttySurface did before parking,
-  // and changes only when libghostty allocates a new Target.
-  // fstat failure (rare; would indicate a closed fd, which we
-  // already check above via `fd < 0`) falls through to cache miss
-  // → create_immed will likely fail too, but the error path there
-  // already logs cleanly.
+  // Wrap libghostty's borrowed fd in a wl_buffer, cached per dma-buf
+  // identity (kernel inode) — see m_buffers in the header for the full
+  // rationale. fstat the fd to get the anon_inode that uniquely
+  // identifies the dma-buf object; it's stable across the dup that
+  // GhosttySurface did before parking, and changes only when libghostty
+  // allocates a new Target.
   struct stat st;
   unsigned long inode = 0;
   if (::fstat(fd, &st) == 0) inode = static_cast<unsigned long>(st.st_ino);
-  const bool cache_hit = m_cachedBuffer != nullptr &&
-                         inode != 0 &&
-                         m_cachedInode == inode &&
-                         m_cachedWidth == width &&
-                         m_cachedHeight == height &&
-                         m_cachedStride == stride &&
-                         m_cachedFormat == drm_format &&
-                         m_cachedModifier == drm_modifier &&
-                         m_cachedYInvert == y_invert;
-  wl_buffer *buffer = nullptr;
-  if (cache_hit) {
-    buffer = m_cachedBuffer;
-  } else {
-    // Cache miss — destroy any stale buffer first so a failed
-    // create_immed below leaves the cache empty (rather than half-
-    // populated with the previous buffer that no longer matches the
-    // new inputs).
-    if (m_cachedBuffer) {
-      wl_buffer_destroy(m_cachedBuffer);
-      m_cachedBuffer = nullptr;
-      m_cachedInode = 0;
+
+  // Purge entries from a previous Target generation. A resize deinits
+  // every Target and exports new fds (new inodes) with a new shape;
+  // their wl_buffers are now backed by freed memory and must go. Within
+  // a single generation all buffers share one shape, so a shape
+  // mismatch against this present marks the stale generation.
+  for (auto it = m_buffers.begin(); it != m_buffers.end();) {
+    const CachedBuffer &c = it->second;
+    const bool same_shape = c.width == width && c.height == height &&
+                            c.stride == stride && c.format == drm_format &&
+                            c.modifier == drm_modifier && c.yInvert == y_invert;
+    if (same_shape) {
+      ++it;
+      continue;
     }
+    if (c.buffer == m_lastPresentedBuffer) m_lastPresentedBuffer = nullptr;
+    if (c.buffer == m_awaitingReleaseOf) m_awaitingReleaseOf = nullptr;
+    if (c.buffer) wl_buffer_destroy(c.buffer);
+    it = m_buffers.erase(it);
+  }
+
+  wl_buffer *buffer = nullptr;
+  const auto hit = (inode != 0) ? m_buffers.find(inode) : m_buffers.end();
+  if (hit != m_buffers.end()) {
+    // Cache hit: same Target (inode), same shape (guaranteed by the
+    // purge above). Reattach the existing wl_buffer.
+    buffer = hit->second.buffer;
+  } else {
     zwp_linux_buffer_params_v1 *params =
         zwp_linux_dmabuf_v1_create_params(m_dmabuf);
     if (!params) return;
@@ -641,18 +685,27 @@ void SubsurfacePresenter::presentDmabuf(int fd, uint32_t drm_format,
                    static_cast<unsigned long long>(drm_modifier), wl_err);
       return;
     }
-    // Listener data is unused — see `bufferRelease` for why this is
-    // nullptr (and the no-op release semantics that make the cache
-    // safe).
-    wl_buffer_add_listener(buffer, &kBufferListener, nullptr);
-    m_cachedBuffer = buffer;
-    m_cachedInode = inode;
-    m_cachedWidth = width;
-    m_cachedHeight = height;
-    m_cachedStride = stride;
-    m_cachedFormat = drm_format;
-    m_cachedModifier = drm_modifier;
-    m_cachedYInvert = y_invert;
+    // Attach the release listener. The data pointer is the presenter so
+    // onBufferReleased can resolve the release-gate (Increment 2).
+    wl_buffer_add_listener(buffer, &kBufferListener, this);
+    if (inode != 0) {
+      m_buffers.emplace(inode, CachedBuffer{buffer, width, height, stride,
+                                            drm_format, drm_modifier, y_invert});
+    } else {
+      // No inode to key on (fstat failed — effectively impossible for a
+      // live anon_inode dma-buf fd on Linux). We can't track this buffer
+      // for reuse, so hold exactly one fallback and destroy the previous
+      // one (the compositor is done with it ≥1 frame later) to avoid an
+      // unbounded leak on a pathological host.
+      if (m_uncachedBuffer) {
+        if (m_uncachedBuffer == m_lastPresentedBuffer)
+          m_lastPresentedBuffer = nullptr;
+        if (m_uncachedBuffer == m_awaitingReleaseOf)
+          m_awaitingReleaseOf = nullptr;
+        wl_buffer_destroy(m_uncachedBuffer);
+      }
+      m_uncachedBuffer = buffer;
+    }
   }
 
   // Tell the compositor the destination size in surface-local
@@ -670,6 +723,22 @@ void SubsurfacePresenter::presentDmabuf(int fd, uint32_t drm_format,
   }
 
   wl_surface_attach(m_childSurface, buffer, 0, 0);
+  // Capture the buffer this commit supersedes (post-purge, so it's null
+  // if a resize already destroyed it) before overwriting the field.
+  wl_buffer *const replaced = m_lastPresentedBuffer;
+  // Remember the buffer we're showing so a hide/show can re-attach it
+  // (reattachCached) instead of leaving a transparent gap.
+  m_lastPresentedBuffer = buffer;
+  m_lastPresentedWidth = width;
+  m_lastPresentedHeight = height;
+  // If this commit supersedes a different buffer, hold the release-gate
+  // closed until the compositor releases that buffer (handled in
+  // onBufferReleased). Reattaching the SAME buffer (replaced == buffer)
+  // frees nothing, so the guard opens the gate immediately instead.
+  if (replaced && replaced != buffer) {
+    m_awaitingReleaseOf = replaced;
+    gate_deferred = true;
+  }
   // Damage the full buffer extent — terminals tend to update large
   // dirty rects anyway (cursor blink, scroll, repaint) so a precise
   // damage region wouldn't save much, and `damage_buffer` (vs
@@ -727,7 +796,7 @@ void SubsurfacePresenter::flushDisplay() {
 }
 
 bool SubsurfacePresenter::reattachCached() {
-  if (!m_childSurface || !m_cachedBuffer) return false;
+  if (!m_childSurface || !m_lastPresentedBuffer) return false;
   // Re-show whatever we had attached before `hide()`. The cached
   // wl_buffer survives across hide/show because the release
   // listener no-ops (see `bufferRelease`). The dmabuf backing the
@@ -743,10 +812,10 @@ bool SubsurfacePresenter::reattachCached() {
   // re-attach the user sees through to whatever is behind the
   // window. The renderer's next frame overwrites this within
   // DRAW_INTERVAL.
-  wl_surface_attach(m_childSurface, m_cachedBuffer, 0, 0);
+  wl_surface_attach(m_childSurface, m_lastPresentedBuffer, 0, 0);
   wl_surface_damage_buffer(m_childSurface, 0, 0,
-                           static_cast<int32_t>(m_cachedWidth),
-                           static_cast<int32_t>(m_cachedHeight));
+                           static_cast<int32_t>(m_lastPresentedWidth),
+                           static_cast<int32_t>(m_lastPresentedHeight));
   // Register a frame callback so the consumer's pacing state machine
   // gets a "compositor is ready" event after this re-attach too —
   // otherwise a tab switch could leave m_compositorReady stuck false
