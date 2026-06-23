@@ -63,6 +63,13 @@ pub const DRM_FORMAT_MOD_LINEAR: u64 = 0;
 /// avoids allocator threading through the per-surface init path.
 const MAX_MODIFIERS: usize = 64;
 
+/// One-shot guard for the per-modifier diagnostic dump in `pickModifier`.
+/// `pickModifier` runs on every Target init (per surface, per resize), so we
+/// only want the verbose breakdown once — enough to diagnose why a given
+/// GPU/compositor pair can't reach direct mode without spamming the log on
+/// every resize. Diagnostic-only; a benign race that logs twice is harmless.
+var diag_dumped: bool = false;
+
 /// Which dmabuf-export strategy this `Target` settled on. See the
 /// module-level doc comment for the full rationale.
 pub const Tiling = enum {
@@ -276,6 +283,47 @@ fn pickModifier(
 
     if (best_tiled) |m| return m;
     if (has_linear) return DRM_FORMAT_MOD_LINEAR;
+
+    // No qualifying modifier — we're about to drop to `.legacy_copy` (the
+    // CPU-copy present path). On hardware like NVIDIA this is expected, but
+    // the generic warning in `init` doesn't say *why* the intersection was
+    // empty. Dump the per-modifier breakdown once so the cause is visible:
+    // for each GPU modifier, whether it's single-plane, whether it carries
+    // the required feature bits (COLOR_ATTACHMENT | TRANSFER_SRC | SAMPLED),
+    // and whether the compositor accepts it. A modifier needs all three to
+    // qualify; the column that reads "no" is the reason direct mode is off.
+    if (!diag_dumped) {
+        diag_dumped = true;
+        log.info(
+            "direct-mode probe failed for drm_format 0x{x} " ++
+                "(required tiling features 0x{x}); per-modifier breakdown:",
+            .{ drm_format, required_features },
+        );
+        for (gpu_mods[0..mod_list.drmFormatModifierCount]) |gm| {
+            var compositor_ok = false;
+            for (host_mods[0..host_count]) |hm| {
+                if (hm == gm.drmFormatModifier) {
+                    compositor_ok = true;
+                    break;
+                }
+            }
+            const has_feats =
+                (gm.drmFormatModifierTilingFeatures & required_features) ==
+                required_features;
+            log.info(
+                "  mod=0x{x} planes={} features=0x{x} " ++
+                    "single_plane={} has_required_features={} compositor_accepts={}",
+                .{
+                    gm.drmFormatModifier,
+                    gm.drmFormatModifierPlaneCount,
+                    gm.drmFormatModifierTilingFeatures,
+                    gm.drmFormatModifierPlaneCount == 1,
+                    has_feats,
+                    compositor_ok,
+                },
+            );
+        }
+    }
     return null;
 }
 
