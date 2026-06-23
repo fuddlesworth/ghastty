@@ -1665,6 +1665,9 @@ void GhosttySurface::keyPressEvent(QKeyEvent *ev) {
     m_owner->removeSurface(this);
     return;
   }
+  // Interacting with the surface acknowledges any pending bell (GTK clears
+  // the bell on key/focus/click); cheap guard so steady typing is free.
+  if (m_bellTitle && m_owner) m_owner->acknowledgeBell(this);
   sendKey(ev,
           ev->isAutoRepeat() ? GHOSTTY_ACTION_REPEAT : GHOSTTY_ACTION_PRESS);
 }
@@ -1676,6 +1679,7 @@ void GhosttySurface::keyReleaseEvent(QKeyEvent *ev) {
 }
 
 void GhosttySurface::mousePressEvent(QMouseEvent *ev) {
+  if (m_bellTitle && m_owner) m_owner->acknowledgeBell(this);
   if (m_exitOverlay) {
     m_owner->removeSurface(this);
     return;
@@ -1990,6 +1994,7 @@ void GhosttySurface::leaveEvent(QEvent *) {
 
 void GhosttySurface::focusInEvent(QFocusEvent *) {
   if (m_surface) ghostty_surface_set_focus(m_surface, true);
+  if (m_bellTitle && m_owner) m_owner->acknowledgeBell(this);
   update();  // repaint without the unfocused-split dim
 }
 

@@ -87,6 +87,12 @@ public:
   // Update the tab label and window title for `surface`.
   void setSurfaceTitle(GhosttySurface *surface, const QString &title);
 
+  // Acknowledge (clear) an unacknowledged bell `title` mark on `surface`
+  // because the user just interacted with it (focus / key / click),
+  // refreshing the tab's bell indicator. Mirrors GTK's setBellRinging
+  // (false) on interaction. No-op if the surface has no pending bell.
+  void acknowledgeBell(GhosttySurface *surface);
+
   // The live libghostty config (for keybind lookups, etc.). Forwards
   // to GhosttyApp::instance().config(); kept on MainWindow as a thin
   // shim so external callers (GhosttySurface, InspectorWindow) don't
