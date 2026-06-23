@@ -402,7 +402,11 @@ private:
   //   - Initial / gate open: true.
   //   - Renderer present (on its thread): set false before parking.
   //   - Presenter OnBufferReusable (GUI thread): set true, notify.
-  //   - Hide / PlatformSurface destroy: true + notify (with m_hidden).
+  //   - Presenter reset / re-create: true (gate reopened for the rebuilt
+  //     presenter, which won't deliver the pending release).
+  //   - Hide / teardown: the waiter wakes via the m_hidden bail in the
+  //     wait predicate (every hide path sets m_hidden and notifies), not
+  //     via this flag — so these paths leave it as-is.
   bool m_prevBufferReleased = true;
   // True once drainVulkan has successfully attached a dmabuf
   // whose dimensions match the widget's current device-pixel
