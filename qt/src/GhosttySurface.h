@@ -390,6 +390,20 @@ private:
   std::mutex m_compositorMutex;
   std::condition_variable m_compositorCv;
   bool m_compositorReady = true;
+  // Release-gate (Increment 2): the zero-copy flicker fix. The renderer
+  // double-buffers, so it must not redraw the dma-buf the compositor is
+  // still scanning out. After parking a frame the renderer thread blocks
+  // (in presentVulkanDmabuf) until the compositor releases the buffer
+  // that frame's commit replaced — signalled by the presenter's
+  // OnBufferReusable callback flipping this to true. Guarded by
+  // m_compositorMutex, waited on via m_compositorCv (same as
+  // m_compositorReady), with the same 100 ms timeout + m_hidden bail so
+  // a missing release degrades to a one-frame hitch, never a hang.
+  //   - Initial / gate open: true.
+  //   - Renderer present (on its thread): set false before parking.
+  //   - Presenter OnBufferReusable (GUI thread): set true, notify.
+  //   - Hide / PlatformSurface destroy: true + notify (with m_hidden).
+  bool m_prevBufferReleased = true;
   // True once drainVulkan has successfully attached a dmabuf
   // whose dimensions match the widget's current device-pixel
   // size. paintEvent reads this to decide whether to fill the

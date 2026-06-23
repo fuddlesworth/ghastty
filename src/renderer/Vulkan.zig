@@ -132,9 +132,18 @@ pub const custom_shader_extra_defines: []const []const u8 = &.{"GHASTTY_VULKAN 1
 /// pipeline binds it at set 1 binding 0 → sampler returns garbage.
 pub const rewriteCustomShaderSource = shaders.vulkanizeGlsl;
 
-/// Single-buffered for v1; fence-paced submit-then-wait means there's
-/// only ever one frame in flight.
-pub const swap_chain_count = 1;
+/// Double-buffered. The fence-paced submit-then-wait in `Frame.complete`
+/// still keeps exactly one frame *GPU-in-flight* at a time — the second
+/// buffer is not for pipelining GPU work. It exists so the renderer draws
+/// the next frame into a *different* exported dmabuf than the one the
+/// compositor is currently scanning out: on the zero-copy (`.direct`)
+/// present path the compositor may hold a buffer on a hardware plane past
+/// our `wl_surface.frame` callback, and reusing the single buffer would
+/// overwrite pixels mid-scanout → flicker/tearing. Two buffers let the
+/// in-flight frame and the on-screen frame be distinct; the reuse of a
+/// buffer is additionally gated on the compositor's `wl_buffer.release`
+/// (see the host presenter) so we never redraw a buffer it still holds.
+pub const swap_chain_count = 2;
 
 const log = std.log.scoped(.vulkan);
 
