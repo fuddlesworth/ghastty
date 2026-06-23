@@ -322,6 +322,11 @@ void GhosttyApp::onConfirmReadClipboard(void *ud, const char *str,
                                             QMessageBox::RejectRole);
         box.setDefaultButton(cancel);
         box.exec();
+        // exec() spun a nested loop; if the surface closed during it, the
+        // pending request (and its `state` token) was torn down with the
+        // surface — completing it against the freed surface would be a
+        // use-after-free, so just drop it.
+        if (!sp || !sp->surface()) return;
         ghostty_surface_complete_clipboard_request(
             sp->surface(), content.constData(), state,
             box.clickedButton() == paste);
