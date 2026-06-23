@@ -29,3 +29,8 @@ glad.zip
 
 vgcore.*
 
+
+# Local agent tooling (Claude Code / claude-flow / MCP) — personal, not project files
+.claude/
+.claude-flow/
+.mcp.json
