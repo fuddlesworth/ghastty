@@ -16,8 +16,10 @@ static Qt::CursorShape mouseShapeToCursor(ghostty_action_mouse_shape_e s) {
     case GHOSTTY_MOUSE_SHAPE_VERTICAL_TEXT: return Qt::IBeamCursor;
     case GHOSTTY_MOUSE_SHAPE_POINTER:
     case GHOSTTY_MOUSE_SHAPE_ALIAS: return Qt::PointingHandCursor;
-    case GHOSTTY_MOUSE_SHAPE_WAIT:
-    case GHOSTTY_MOUSE_SHAPE_PROGRESS: return Qt::WaitCursor;
+    case GHOSTTY_MOUSE_SHAPE_WAIT: return Qt::WaitCursor;
+    // PROGRESS = busy but still interactive (arrow + spinner), distinct
+    // from WAIT (fully blocked). GTK uses the "progress" theme cursor.
+    case GHOSTTY_MOUSE_SHAPE_PROGRESS: return Qt::BusyCursor;
     case GHOSTTY_MOUSE_SHAPE_CROSSHAIR:
     case GHOSTTY_MOUSE_SHAPE_CELL: return Qt::CrossCursor;
     case GHOSTTY_MOUSE_SHAPE_NOT_ALLOWED:

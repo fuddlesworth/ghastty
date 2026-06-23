@@ -974,6 +974,13 @@ void MainWindow::onCurrentChanged(int index) {
   updateTabText(index);
 }
 
+void MainWindow::acknowledgeBell(GhosttySurface *surface) {
+  if (!surface || !surface->bellTitle()) return;
+  surface->setBellTitle(false);
+  const int idx = tabIndexForSurface(surface);
+  if (idx >= 0) updateTabText(idx);
+}
+
 GhosttySurface *MainWindow::surfaceAt(int index) const {
   QWidget *page = m_tabs->widget(index);
   if (!page) return nullptr;

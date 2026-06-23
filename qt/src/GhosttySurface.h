@@ -299,6 +299,10 @@ private:
   // already accounts for shift-bypass + mouse-shift-capture, so the
   // right-click context menu keys off it (see contextMenuEvent).
   bool sendMouseButton(QMouseEvent *, ghostty_input_mouse_state_e state);
+  // Feed a touchpad horizontal-scroll delta into the swipe-to-switch-tab
+  // accumulator; fires next_tab/previous_tab when a swipe passes the
+  // threshold. See m_pendingHScroll.
+  void accumulateHorizontalSwipe(double dx);
 
   // The keybind currently bound to `action` (for context-menu hints),
   // or an empty sequence if none / not displayable.
@@ -490,6 +494,15 @@ private:
   // so Shift+right-click (which the core lets bypass mouse reporting)
   // reaches the menu even while a TUI has the mouse grabbed.
   bool m_rightPressConsumed = false;
+
+  // Touchpad horizontal-swipe → tab navigation. Accumulated horizontal
+  // precision-scroll delta; once a swipe passes the threshold it fires
+  // next_tab/previous_tab and resets. Mirrors the GTK apprt, which
+  // repurposes surface-unit horizontal scroll for tab switching rather
+  // than forwarding it as terminal scroll. The single-shot timer clears
+  // a stale partial swipe so unrelated later scrolls don't accumulate.
+  double m_pendingHScroll = 0.0;
+  QTimer *m_hScrollResetTimer = nullptr;
   // Last requested cursor shape (from MOUSE_SHAPE) and visibility
   // (from MOUSE_VISIBILITY). Tracked separately so toggling
   // visibility doesn't reset the shape.

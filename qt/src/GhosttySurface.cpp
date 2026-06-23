@@ -1665,6 +1665,9 @@ void GhosttySurface::keyPressEvent(QKeyEvent *ev) {
     m_owner->removeSurface(this);
     return;
   }
+  // Interacting with the surface acknowledges any pending bell (GTK clears
+  // the bell on key/focus/click); cheap guard so steady typing is free.
+  if (m_bellTitle && m_owner) m_owner->acknowledgeBell(this);
   sendKey(ev,
           ev->isAutoRepeat() ? GHOSTTY_ACTION_REPEAT : GHOSTTY_ACTION_PRESS);
 }
@@ -1676,6 +1679,7 @@ void GhosttySurface::keyReleaseEvent(QKeyEvent *ev) {
 }
 
 void GhosttySurface::mousePressEvent(QMouseEvent *ev) {
+  if (m_bellTitle && m_owner) m_owner->acknowledgeBell(this);
   if (m_exitOverlay) {
     m_owner->removeSurface(this);
     return;
@@ -1942,10 +1946,16 @@ void GhosttySurface::wheelEvent(QWheelEvent *ev) {
   const QPoint pd = ev->pixelDelta();
   if (!pd.isNull()) {
     const double scale = devicePixelRatioF() * kPrecisionScrollMultiplier;
-    dx = pd.x() * scale;
     dy = pd.y() * scale;
     mods |= 1;  // ScrollMods.precision
+    // Horizontal touchpad swipe drives tab navigation, not terminal
+    // scroll — mirrors the GTK apprt, which converts surface-unit
+    // horizontal scroll to tab.next/previous-page. dx stays 0 so the
+    // horizontal delta is never forwarded as a scroll.
+    accumulateHorizontalSwipe(pd.x());
   } else {
+    // Classic wheel (incl. a horizontal tilt wheel): forward both axes
+    // to the core as discrete scroll, as before.
     const QPoint a = ev->angleDelta();
     dx = a.x() / 120.0;
     dy = a.y() / 120.0;
@@ -1960,8 +1970,42 @@ void GhosttySurface::wheelEvent(QWheelEvent *ev) {
     case Qt::ScrollMomentum: mods |= (3 /*changed*/) << 1; break;
     default: break;  // NoScrollPhase: treat as a discrete notch
   }
-  ghostty_surface_mouse_scroll(m_surface, dx, dy, mods);
-  flashScrollbar();  // mouse-wheel scrolling reveals the overlay scrollbar
+  // A pure horizontal touchpad swipe (consumed for tab nav) leaves both
+  // deltas zero — don't bother the core or flash the scrollbar then.
+  if (dx != 0.0 || dy != 0.0)
+    ghostty_surface_mouse_scroll(m_surface, dx, dy, mods);
+  if (dy != 0.0)
+    flashScrollbar();  // vertical scrolling reveals the overlay scrollbar
+}
+
+void GhosttySurface::accumulateHorizontalSwipe(double dx) {
+  if (dx == 0.0) return;
+  m_pendingHScroll += dx;
+
+  // A deliberate swipe of ~this many accumulated logical pixels steps one
+  // tab. Mirrors the GTK apprt's 120-unit threshold; tuned for a clear
+  // two-finger swipe rather than incidental horizontal jitter.
+  constexpr double kTabSwipeThreshold = 120.0;
+  if (std::abs(m_pendingHScroll) >= kTabSwipeThreshold) {
+    // Sign mirrors the GTK apprt: accumulate < 0 → next, else previous.
+    const char *action = m_pendingHScroll < 0.0 ? "next_tab" : "previous_tab";
+    m_pendingHScroll = 0.0;
+    if (m_hScrollResetTimer) m_hScrollResetTimer->stop();
+    if (m_surface)
+      ghostty_surface_binding_action(m_surface, action, qstrlen(action));
+    return;
+  }
+
+  // Sub-threshold: arm/refresh a reset so a slow or abandoned partial
+  // swipe doesn't accumulate into a later unrelated scroll (GTK uses a
+  // 500 ms reset timer for the same reason).
+  if (!m_hScrollResetTimer) {
+    m_hScrollResetTimer = new QTimer(this);
+    m_hScrollResetTimer->setSingleShot(true);
+    connect(m_hScrollResetTimer, &QTimer::timeout, this,
+            [this]() { m_pendingHScroll = 0.0; });
+  }
+  m_hScrollResetTimer->start(500);
 }
 
 void GhosttySurface::enterEvent(QEnterEvent *ev) {
@@ -1990,6 +2034,7 @@ void GhosttySurface::leaveEvent(QEvent *) {
 
 void GhosttySurface::focusInEvent(QFocusEvent *) {
   if (m_surface) ghostty_surface_set_focus(m_surface, true);
+  if (m_bellTitle && m_owner) m_owner->acknowledgeBell(this);
   update();  // repaint without the unfocused-split dim
 }
 
