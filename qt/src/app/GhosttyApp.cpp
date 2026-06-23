@@ -331,7 +331,7 @@ void GhosttyApp::onConfirmReadClipboard(void *ud, const char *str,
 
 void GhosttyApp::onWriteClipboard(void *ud, ghostty_clipboard_e loc,
                                   const ghostty_clipboard_content_s *content,
-                                  size_t n, bool) {
+                                  size_t n, bool confirm) {
   if (n == 0 || !content[0].data) return;
   auto *surface = static_cast<GhosttySurface *>(ud);
   if (!instance().surfaceAlive(surface)) return;
@@ -340,30 +340,74 @@ void GhosttyApp::onWriteClipboard(void *ud, ghostty_clipboard_e loc,
                                     ? QClipboard::Selection
                                     : QClipboard::Clipboard;
   const QString text = QString::fromUtf8(content[0].data);
-  // The clipboard is process-global; route via qApp so a window
-  // dying mid-flight does not strand the write.
-  QMetaObject::invokeMethod(
-      qApp,
-      [text, mode]() { QGuiApplication::clipboard()->setText(text, mode); },
-      Qt::QueuedConnection);
 
-  // In-window toast feedback, matching the GTK frontend's AdwToast on
-  // clipboard write. Only the standard clipboard toasts — the selection
-  // clipboard is rewritten on every text selection, so a toast there
-  // would be constant noise (GTK gates on `clipboard_type == .standard`
-  // too). Gated by app-notifications.clipboard-copy (bit 0); a bitfield
-  // read failure defaults both bits on, so the toast still appears.
-  if (loc == GHOSTTY_CLIPBOARD_STANDARD &&
-      (config::bitfield("app-notifications", 0x3) & 0x1)) {
-    const QString msg = text.isEmpty()
-                            ? QStringLiteral("Cleared clipboard")
-                            : QStringLiteral("Copied to clipboard");
-    MainWindow *win = surface->owner();
-    QPointer<MainWindow> winp(win);
+  // Perform the actual write + toast. The clipboard is process-global,
+  // so route via qApp so a window dying mid-flight does not strand the
+  // write; the toast is per-window.
+  auto performWrite = [text, mode, loc, surface]() {
     QMetaObject::invokeMethod(
-        win, [winp, msg]() { if (winp) winp->showToast(msg); },
+        qApp,
+        [text, mode]() { QGuiApplication::clipboard()->setText(text, mode); },
         Qt::QueuedConnection);
+
+    // In-window toast feedback, matching the GTK frontend's AdwToast on
+    // clipboard write. Only the standard clipboard toasts — the selection
+    // clipboard is rewritten on every text selection, so a toast there
+    // would be constant noise (GTK gates on `clipboard_type == .standard`
+    // too). Gated by app-notifications.clipboard-copy (bit 0); a bitfield
+    // read failure defaults both bits on, so the toast still appears.
+    if (loc == GHOSTTY_CLIPBOARD_STANDARD &&
+        (config::bitfield("app-notifications", 0x3) & 0x1)) {
+      const QString msg = text.isEmpty()
+                              ? QStringLiteral("Cleared clipboard")
+                              : QStringLiteral("Copied to clipboard");
+      QPointer<MainWindow> winp(surface->owner());
+      QMetaObject::invokeMethod(
+          winp, [winp, msg]() { if (winp) winp->showToast(msg); },
+          Qt::QueuedConnection);
+    }
+  };
+
+  // Without a confirmation request (the common case), write immediately.
+  if (!confirm) {
+    performWrite();
+    return;
   }
+
+  // libghostty asks for confirmation when a program writes the clipboard
+  // via OSC 52 under `clipboard-write = ask`. Mirror onConfirmReadClipboard:
+  // defer a modal dialog (a modal here would re-enter libghostty through
+  // the render tick) and only write if the user approves. No completion
+  // token for writes — approval simply gates performWrite.
+  QPointer<GhosttySurface> sp(surface);
+  QMetaObject::invokeMethod(
+      surface->owner(),
+      [sp, text, performWrite]() {
+        if (!sp || !sp->surface()) return;
+        QString preview = text;
+        if (preview.size() > 200) {
+          int cut = 200;
+          while (cut > 0 && preview.at(cut - 1).isHighSurrogate()) --cut;
+          preview = preview.left(cut) + QStringLiteral("…");
+        }
+        QMessageBox box(sp->owner());
+        box.setIcon(QMessageBox::Warning);
+        box.setWindowTitle(QStringLiteral("Confirm Clipboard Write"));
+        box.setText(
+            QStringLiteral("An application wants to write to the clipboard."));
+        box.setInformativeText(preview);
+        QPushButton *allow = box.addButton(QStringLiteral("Copy"),
+                                           QMessageBox::AcceptRole);
+        QPushButton *cancel = box.addButton(QStringLiteral("Cancel"),
+                                            QMessageBox::RejectRole);
+        box.setDefaultButton(cancel);
+        box.exec();
+        // exec() spun a nested loop; the surface may have closed during
+        // it. performWrite() dereferences the surface, so re-check sp.
+        if (sp && sp->surface() && box.clickedButton() == allow)
+          performWrite();
+      },
+      Qt::QueuedConnection);
 }
 
 void GhosttyApp::onCloseSurface(void *ud, bool) {
