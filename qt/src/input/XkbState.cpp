@@ -147,17 +147,21 @@ constexpr SymKey kKeymap[] = {
 
 }  // namespace
 
+ghostty_input_key_e XkbState::keyForKeysym(uint32_t sym) const {
+  if (sym == XKB_KEY_NoSymbol || sym == 0) return GHOSTTY_KEY_UNIDENTIFIED;
+  for (const auto &e : kKeymap)
+    if (e.sym == sym) return e.key;
+  return GHOSTTY_KEY_UNIDENTIFIED;
+}
+
 ghostty_input_key_e XkbState::keyForKeycode(uint32_t keycode) const {
   syncFromTracker();
   if (!m_unshifted) return GHOSTTY_KEY_UNIDENTIFIED;
   // Base (level-0) keysym for this physical key under the live keymap.
-  // This is the post-remap identity GTK reads from the GDK keyval; an
-  // XKB user-remap (caps->escape) surfaces here as the remapped keysym.
-  const xkb_keysym_t sym = xkb_state_key_get_one_sym(m_unshifted, keycode);
-  if (sym == XKB_KEY_NoSymbol) return GHOSTTY_KEY_UNIDENTIFIED;
-  for (const auto &e : kKeymap)
-    if (e.sym == sym) return e.key;
-  return GHOSTTY_KEY_UNIDENTIFIED;
+  // This is the post-remap identity an XKB user-remap (caps->escape)
+  // surfaces as the remapped keysym. Used as a fallback when the event
+  // carried no effective keysym (see GhosttySurface::sendKey).
+  return keyForKeysym(xkb_state_key_get_one_sym(m_unshifted, keycode));
 }
 
 uint32_t XkbState::unshiftedCodepoint(uint32_t keycode) const {

@@ -47,6 +47,13 @@ public:
   // layout-independent identity. GHOSTTY_KEY_UNIDENTIFIED if unknown.
   ghostty_input_key_e keyForKeycode(uint32_t keycode) const;
 
+  // Map an XKB keysym directly to the ghostty key enum. Prefer this with
+  // the event's *effective* keysym (Qt's nativeVirtualKey, = GTK's keyval)
+  // so level-dependent remaps resolve correctly — e.g. Shift+CapsLock under
+  // caps:escape_shifted_capslock is Caps_Lock, not the base-level Escape.
+  // GHOSTTY_KEY_UNIDENTIFIED if the keysym isn't in our table.
+  ghostty_input_key_e keyForKeysym(uint32_t sym) const;
+
   // Side bits for the libghostty mods bitfield, derived from a
   // keycode — pressing Right-Shift sets BOTH the unsided
   // GHOSTTY_MODS_SHIFT and GHOSTTY_MODS_SHIFT_RIGHT bit (a left-side
