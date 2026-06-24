@@ -132,18 +132,24 @@ pub const custom_shader_extra_defines: []const []const u8 = &.{"GHASTTY_VULKAN 1
 /// pipeline binds it at set 1 binding 0 → sampler returns garbage.
 pub const rewriteCustomShaderSource = shaders.vulkanizeGlsl;
 
-/// Double-buffered. The fence-paced submit-then-wait in `Frame.complete`
-/// still keeps exactly one frame *GPU-in-flight* at a time — the second
-/// buffer is not for pipelining GPU work. It exists so the renderer draws
-/// the next frame into a *different* exported dmabuf than the one the
-/// compositor is currently scanning out: on the zero-copy (`.direct`)
+/// Triple-buffered. The fence-paced submit-then-wait in `Frame.complete`
+/// still keeps exactly one frame *GPU-in-flight* at a time — the extra
+/// buffers are not for pipelining GPU work. They exist so the renderer
+/// draws the next frame into a *different* exported dmabuf than the one
+/// the compositor is currently scanning out: on the zero-copy (`.direct`)
 /// present path the compositor may hold a buffer on a hardware plane past
-/// our `wl_surface.frame` callback, and reusing the single buffer would
-/// overwrite pixels mid-scanout → flicker/tearing. Two buffers let the
-/// in-flight frame and the on-screen frame be distinct; the reuse of a
-/// buffer is additionally gated on the compositor's `wl_buffer.release`
-/// (see the host presenter) so we never redraw a buffer it still holds.
-pub const swap_chain_count = 2;
+/// our `wl_surface.frame` callback, and reusing a buffer mid-scanout
+/// flickers/tears.
+///
+/// Two buffers fixed the flicker but the host's release-gate then had to
+/// block the renderer after every present until the just-replaced buffer
+/// was released — adding ~a frame of latency that felt laggy on
+/// compositors slow to release (integrated GPUs). A third buffer lets the
+/// host gate count: the renderer only blocks when ALL buffers are still
+/// held by the compositor (rare), so steady-state latency drops back to
+/// frame-callback pacing while reuse is still never allowed on an
+/// unreleased buffer. See the host presenter / GhosttySurface gate.
+pub const swap_chain_count = 3;
 
 const log = std.log.scoped(.vulkan);
 

@@ -631,10 +631,10 @@ bool GhosttySurface::event(QEvent *e) {
       {
         std::lock_guard<std::mutex> lg(m_compositorMutex);
         m_compositorReady = true;
-        // Presenter gone → its OnBufferReusable will never fire. Open
-        // the release-gate so a renderer thread parked in the second
-        // (release) wait can re-check m_hidden and bail.
-        m_prevBufferReleased = true;
+        // Presenter gone → its OnBufferReusable will never fire. Reset the
+        // in-flight count to fully open the release-gate so a renderer
+        // thread parked in WAIT-2 can re-check m_hidden and bail.
+        m_buffersInFlight = 0;
       }
       m_compositorCv.notify_all();
       // Presenter rebuild on next Show needs a fresh frame to
@@ -796,15 +796,15 @@ bool GhosttySurface::event(QEvent *e) {
             // m_compositorReady and re-pumps drainVulkan.
             m_subsurfacePresenter->setOnFrameReady(
                 [this]() { onWaylandFrameReady(); });
-            // Wire the release-gate (Increment 2): when the compositor
-            // releases the buffer a present replaced, the renderer may
-            // reuse it. Flip m_prevBufferReleased and wake the renderer
-            // thread blocked in presentVulkanDmabuf. Runs on the GUI
-            // thread (Wayland dispatch), same as onWaylandFrameReady.
+            // Wire the release-gate: a present's buffer became reusable
+            // (the buffer it replaced was released, or it replaced
+            // nothing). Drop the in-flight count so a renderer blocked in
+            // presentVulkanDmabuf's WAIT-2 can claim a free buffer. Runs
+            // on the GUI thread (Wayland dispatch), like onWaylandFrameReady.
             m_subsurfacePresenter->setOnBufferReusable([this]() {
               {
                 std::lock_guard<std::mutex> lg(m_compositorMutex);
-                m_prevBufferReleased = true;
+                if (m_buffersInFlight > 0) m_buffersInFlight--;
               }
               m_compositorCv.notify_all();
             });
@@ -816,7 +816,7 @@ bool GhosttySurface::event(QEvent *e) {
             {
               std::lock_guard<std::mutex> lg(m_compositorMutex);
               m_compositorReady = true;
-              m_prevBufferReleased = true;
+              m_buffersInFlight = 0;
             }
             if (m_useVulkan) {
               m_useSubsurface.store(true, std::memory_order_release);
@@ -863,6 +863,10 @@ bool GhosttySurface::event(QEvent *e) {
       {
         std::lock_guard<std::mutex> lg(m_compositorMutex);
         m_compositorReady = true;
+        // Reset the in-flight count: on hide, parked buffers may not all
+        // get a release, so clear it to fully open the gate for the next
+        // Show rather than carry a stale count.
+        m_buffersInFlight = 0;
       }
       m_compositorCv.notify_all();
     }
@@ -2285,14 +2289,13 @@ void GhosttySurface::presentVulkanDmabuf(
       // anyway on the m_hidden check below.
       if (m_hidden.load(std::memory_order_acquire)) return;
       m_compositorReady = false;
-      // Close the release-gate for the frame we're about to park: this
-      // present will replace the on-screen buffer, and the renderer must
-      // not reuse the buffer it rotates to next until the compositor has
-      // released it. Set false BEFORE scheduling drainVulkan so the
-      // presenter's OnBufferReusable (fired from that commit / its
-      // buffer release) can only flip it true afterwards — never a stale
-      // true from the previous frame. Resolved in the WAIT-2 block below.
-      m_prevBufferReleased = false;
+      // Count this frame as in-flight: it's about to be parked and
+      // committed, occupying a buffer until the compositor releases it
+      // (presenter OnBufferReusable → decrement). Incremented BEFORE
+      // scheduling drainVulkan so the count is already raised when WAIT-2
+      // below checks it. The renderer only blocks once ALL buffers are in
+      // flight (see WAIT-2), so with triple buffering it rarely waits.
+      m_buffersInFlight++;
     }
     // GUI-thread bypass intentionally does NOT touch m_compositorReady:
     // it consumed no pacing token, so the renderer thread's gate state
@@ -2323,9 +2326,10 @@ void GhosttySurface::presentVulkanDmabuf(
       {
         std::lock_guard<std::mutex> lg(m_compositorMutex);
         m_compositorReady = true;  // unblock our own backpressure
-        // No frame parked → reopen the release-gate we closed above so
-        // the next present isn't gated on a commit that never happened.
-        m_prevBufferReleased = true;
+        // No frame parked → undo the in-flight increment above so the
+        // count isn't inflated by a frame that never committed (its
+        // OnBufferReusable decrement will never come).
+        if (m_buffersInFlight > 0) m_buffersInFlight--;
       }
       m_compositorCv.notify_all();
       return;
@@ -2380,20 +2384,22 @@ void GhosttySurface::presentVulkanDmabuf(
                                 Qt::QueuedConnection);
     }
 
-    // WAIT-2 — the release-gate. Block the renderer thread until the
-    // compositor releases the buffer this frame's commit replaces, so
-    // the next frame doesn't redraw a buffer still being scanned out
-    // (the zero-copy flicker). The GUI thread commits the parked frame
-    // (drainVulkan, just scheduled) and the presenter's OnBufferReusable
-    // flips m_prevBufferReleased once the replaced buffer is freed (or
-    // immediately if this frame replaced nothing). Renderer-thread only:
-    // GUI-thread draws (inline resize) skipped WAIT-1 and must not block
-    // here either. 100 ms timeout + m_hidden bail mirror WAIT-1 — a
-    // missing release degrades to a one-frame hitch, never a hang.
+    // WAIT-2 — the release-gate. Block the renderer thread only when ALL
+    // swap-chain buffers are in flight (presented, none yet released), so
+    // the next frame can't redraw a buffer the compositor is still
+    // scanning out (the zero-copy flicker). With triple buffering this
+    // rarely trips — a free buffer is usually available, so the renderer
+    // proceeds without the per-frame stall that made integrated GPUs
+    // laggy. The GUI thread commits the parked frame (drainVulkan) and
+    // the presenter's OnBufferReusable decrements m_buffersInFlight as
+    // each buffer is released. Renderer-thread only: GUI-thread draws
+    // (inline resize) skipped WAIT-1 and must not block here either.
+    // 100 ms timeout + m_hidden bail mirror WAIT-1 — a missing release
+    // degrades to a brief hitch, never a hang.
     if (onRendererThread) {
       std::unique_lock<std::mutex> lk(m_compositorMutex);
       m_compositorCv.wait_for(lk, std::chrono::milliseconds(100), [this] {
-        return m_prevBufferReleased ||
+        return m_buffersInFlight < kSwapChainCount ||
                m_hidden.load(std::memory_order_acquire);
       });
     }
