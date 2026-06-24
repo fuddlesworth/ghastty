@@ -397,24 +397,27 @@ private:
   std::mutex m_compositorMutex;
   std::condition_variable m_compositorCv;
   bool m_compositorReady = true;
-  // Release-gate (Increment 2): the zero-copy flicker fix. The renderer
-  // double-buffers, so it must not redraw the dma-buf the compositor is
-  // still scanning out. After parking a frame the renderer thread blocks
-  // (in presentVulkanDmabuf) until the compositor releases the buffer
-  // that frame's commit replaced — signalled by the presenter's
-  // OnBufferReusable callback flipping this to true. Guarded by
-  // m_compositorMutex, waited on via m_compositorCv (same as
-  // m_compositorReady), with the same 100 ms timeout + m_hidden bail so
-  // a missing release degrades to a one-frame hitch, never a hang.
-  //   - Initial / gate open: true.
-  //   - Renderer present (on its thread): set false before parking.
-  //   - Presenter OnBufferReusable (GUI thread): set true, notify.
-  //   - Presenter reset / re-create: true (gate reopened for the rebuilt
-  //     presenter, which won't deliver the pending release).
-  //   - Hide / teardown: the waiter wakes via the m_hidden bail in the
-  //     wait predicate (every hide path sets m_hidden and notifies), not
-  //     via this flag — so these paths leave it as-is.
-  bool m_prevBufferReleased = true;
+  // Release-gate (the zero-copy flicker fix): the renderer triple-buffers
+  // and must not redraw a dma-buf the compositor is still scanning out.
+  // This counts frames PARKED but not yet known-reusable — i.e. presented
+  // and awaiting the presenter's OnBufferReusable signal (which fires when
+  // the buffer that present replaced is released, or immediately if it
+  // replaced nothing). The renderer blocks (in presentVulkanDmabuf, WAIT-2)
+  // only when ALL swap_chain_count buffers are in flight, so steady-state
+  // it rarely blocks (low latency) yet a buffer is never reused while held.
+  // Guarded by m_compositorMutex, waited on via m_compositorCv, with a
+  // 100 ms timeout + m_hidden bail so a missing release degrades to a
+  // brief hitch, never a hang.
+  //   - Initial / open: 0.
+  //   - Renderer present (its thread): ++ before parking a frame.
+  //   - Presenter OnBufferReusable (GUI thread): -- (clamped at 0), notify.
+  //   - Dropped frame before parking (dup fail): -- to undo the ++.
+  //   - Presenter reset / re-create / hide: reset to 0 (gate fully open;
+  //     the rebuilt presenter won't deliver pending releases).
+  int m_buffersInFlight = 0;
+  // Must match renderer swap_chain_count (src/renderer/Vulkan.zig): the
+  // renderer blocks once this many frames are in flight (no free buffer).
+  static constexpr int kSwapChainCount = 3;
   // True once drainVulkan has successfully attached a dmabuf
   // whose dimensions match the widget's current device-pixel
   // size. paintEvent reads this to decide whether to fill the
