@@ -1614,14 +1614,22 @@ void GhosttySurface::sendKey(QKeyEvent *ev, ghostty_input_action_e action) {
       XkbState::instance().keyForKeycode(keycode);
 
   // OR in any right-side bit for this keycode (e.g. Right-Shift sets
-  // SHIFT_RIGHT alongside SHIFT) and the live Caps/Num lock state
-  // from XkbTracker. macOS + GTK populate all of these; without
-  // them, keybinds like `right_shift+x` can't distinguish from
-  // `left_shift+x` and the kitty CSI-u encoding loses the lock bits.
+  // SHIFT_RIGHT alongside SHIFT) so keybinds like `right_shift+x` can be
+  // distinguished from `left_shift+x`.
+  //
+  // We deliberately do NOT OR in the Caps/Num lock state here. The core's
+  // kitty encoder reports caps_lock (bit 64) and num_lock (bit 128) in the
+  // CSI-u modifier from these bits, so e.g. pressing Escape (or an XKB
+  // caps->escape remap) with Caps Lock on encodes as `CSI 27;65u` instead
+  // of a bare ESC — which nvim and friends don't recognise as Escape.
+  // Likewise every key gets `;129` while Num Lock is on. Terminals don't
+  // surface lock state as a held modifier on ordinary keys, so omitting it
+  // keeps Escape (and everything else) correctly encoded. This restores
+  // the pre-XKB-state behaviour; letter casing and ctrl+letter still work
+  // because the core lowercases via unshifted_codepoint, not this bit.
   const ghostty_input_mods_e mods = static_cast<ghostty_input_mods_e>(
       translateMods(ev->modifiers()) |
-      XkbState::instance().sideBitsForKeycode(keycode) |
-      XkbState::instance().lockMods());
+      XkbState::instance().sideBitsForKeycode(keycode));
 
   // XKB lookups:
   //   unshifted_codepoint — what this physical key would produce with
