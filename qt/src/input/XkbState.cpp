@@ -189,15 +189,6 @@ ghostty_input_mods_e XkbState::sideBitsForKeycode(uint32_t keycode) const {
   return static_cast<ghostty_input_mods_e>(r);
 }
 
-ghostty_input_mods_e XkbState::lockMods() const {
-  int r = GHOSTTY_MODS_NONE;
-  if (XkbTracker *t = XkbTracker::instance()) {
-    if (t->capsLockOn()) r |= GHOSTTY_MODS_CAPS;
-    if (t->numLockOn()) r |= GHOSTTY_MODS_NUM;
-  }
-  return static_cast<ghostty_input_mods_e>(r);
-}
-
 ghostty_input_mods_e XkbState::consumedMods(uint32_t keycode,
                                             ghostty_input_mods_e mods) const {
   syncFromTracker();

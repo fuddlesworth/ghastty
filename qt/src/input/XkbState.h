@@ -55,9 +55,6 @@ public:
   // distinguish left-vs-right modifier keys couldn't fire.
   ghostty_input_mods_e sideBitsForKeycode(uint32_t keycode) const;
 
-  // Caps Lock / Num Lock state from the live wl_keyboard tracker.
-  ghostty_input_mods_e lockMods() const;
-
   // Modifiers consumed by the layout to produce `keycode`'s text
   // given `mods` are depressed. Returns the consumed subset
   // expressed as ghostty mod bits.
