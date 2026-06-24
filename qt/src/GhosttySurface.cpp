@@ -1605,22 +1605,13 @@ void GhosttySurface::sendKey(QKeyEvent *ev, ghostty_input_action_e action) {
 
   // libghostty derives the physical key from the hardware keycode via a
   // static table that is blind to compositor-level xkb remaps (e.g.
-  // KDE's Caps Lock -> Escape). Resolve the layout-mapped key and hand it
-  // to the core via the `key` field; the core arbitrates it against the
-  // physical keycode (Key.shouldBeRemappable), exactly like the GTK apprt.
-  // The keycode itself stays the true physical key so layout-independent
-  // binds still work.
-  //
-  // Prefer the event's *effective* keysym (nativeVirtualKey — the
-  // mods-applied symbol QtWayland computed from XKB, equivalent to GTK's
-  // keyval), so level-dependent remaps resolve correctly: under
-  // caps:escape_shifted_capslock plain CapsLock is Escape but Shift+CapsLock
-  // is Caps_Lock. Fall back to the keycode's base-level keysym if the
-  // platform left the virtual key empty, so caps->escape still resolves.
-  ghostty_input_key_e mappedKey =
-      XkbState::instance().keyForKeysym(ev->nativeVirtualKey());
-  if (mappedKey == GHOSTTY_KEY_UNIDENTIFIED)
-    mappedKey = XkbState::instance().keyForKeycode(keycode);
+  // KDE's Caps Lock -> Escape). Resolve the layout-mapped key from the
+  // live keymap and hand it to the core via the `key` field; the core
+  // arbitrates it against the physical keycode (Key.shouldBeRemappable),
+  // exactly like the GTK apprt. The keycode itself stays the true
+  // physical key so layout-independent binds still work.
+  const ghostty_input_key_e mappedKey =
+      XkbState::instance().keyForKeycode(keycode);
 
   // OR in any right-side bit for this keycode (e.g. Right-Shift sets
   // SHIFT_RIGHT alongside SHIFT) so keybinds like `right_shift+x` can be
