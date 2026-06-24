@@ -39,13 +39,20 @@ public:
 
   // Resolve a hardware keycode to the layout-mapped ghostty key,
   // honoring compositor-level xkb remaps (e.g. KDE's Caps Lock ->
-  // Escape). Looks up the key's base keysym in the live keymap and
-  // maps it to the ghostty key enum (mirroring the GTK apprt's
-  // keyFromKeyval table). Returned as ghostty_input_key_s.key; the
-  // core arbitrates it against the physical keycode via
-  // Key.shouldBeRemappable, so writing-system keys keep their
-  // layout-independent identity. GHOSTTY_KEY_UNIDENTIFIED if unknown.
-  ghostty_input_key_e keyForKeycode(uint32_t keycode) const;
+  // Escape). Resolves the event keysym in the live keymap with the
+  // event's `mods` applied and maps it to the ghostty key enum
+  // (mirroring the GTK apprt's keyFromKeyval table). Returned as
+  // ghostty_input_key_s.key; the core arbitrates it against the
+  // physical keycode via Key.shouldBeRemappable, so writing-system
+  // keys keep their layout-independent identity. GHOSTTY_KEY_UNIDENTIFIED
+  // if unknown.
+  //
+  // Applying `mods` (the event's depressed modifiers) matters for layout
+  // options that key off a modifier: under caps:escape_shifted_capslock,
+  // Caps resolves to Escape but Shift+Caps resolves to Caps_Lock. A fixed
+  // level-0 lookup would collapse both to Escape.
+  ghostty_input_key_e keyForKeycode(uint32_t keycode,
+                                    ghostty_input_mods_e mods) const;
 
   // Side bits for the libghostty mods bitfield, derived from a
   // keycode — pressing Right-Shift sets BOTH the unsided
@@ -71,6 +78,10 @@ private:
   // Build / rebuild the derived states from the live keymap. Cheap
   // when the keymap pointer is unchanged (one comparison + return).
   void syncFromTracker() const;
+
+  // Build the xkb depressed-modifier mask for the cached mod indices
+  // from a ghostty mods bitset. Shared by keyForKeycode/consumedMods.
+  xkb_mod_mask_t depressedMask(ghostty_input_mods_e mods) const;
 
   // The keymap our derived states were built from. A ref taken in
   // syncFromTracker (released on rebuild and in dtor) keeps the xkb

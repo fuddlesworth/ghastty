@@ -9,6 +9,7 @@
 #include "SearchBar.h"
 #include "TabWidget.h"
 #include "Util.h"
+#include "XkbTracker.h"
 // Both render paths are compiled now (runtime renderer selection).
 #include "vulkan/Host.h"
 #include "opengl/EglDmabufTarget.h"
@@ -1597,21 +1598,24 @@ void GhosttySurface::sendKey(QKeyEvent *ev, ghostty_input_action_e action) {
       static_cast<unsigned char>(text.front()) >= 0x20 &&
       static_cast<unsigned char>(text.front()) != 0x7f;
 
-  // The Wayland plugin reports the XKB keycode via nativeScanCode(),
-  // which is libghostty's Linux-native input format. The XKB lookups
-  // below (text, unshifted codepoint, sided/consumed mods) all key off
-  // this physical keycode.
-  const uint32_t keycode = ev->nativeScanCode();
-
-  // libghostty derives the physical key from the hardware keycode via a
-  // static table that is blind to compositor-level xkb remaps (e.g.
-  // KDE's Caps Lock -> Escape). Resolve the layout-mapped key from the
-  // live keymap and hand it to the core via the `key` field; the core
-  // arbitrates it against the physical keycode (Key.shouldBeRemappable),
-  // exactly like the GTK apprt. The keycode itself stays the true
-  // physical key so layout-independent binds still work.
-  const ghostty_input_key_e mappedKey =
-      XkbState::instance().keyForKeycode(keycode);
+  // The XKB lookups below (text, unshifted codepoint, sided/consumed
+  // mods, mapped key) all key off the physical XKB keycode. Prefer the
+  // compositor-supplied keycode from our wl_keyboard listener: Qt's
+  // nativeScanCode() is platform-plugin dependent and has been observed
+  // to be neither reliably evdev nor reliably XKB, whereas the Wayland
+  // payload is unambiguously evdev (XkbTracker stores it as evdev+8).
+  // Qt synthesizes auto-repeat events with no matching wl_keyboard.key,
+  // so fall back to the last pressed keycode for those, then finally to
+  // nativeScanCode() (e.g. early startup / non-Wayland).
+  uint32_t keycode = 0;
+  if (XkbTracker *tracker = XkbTracker::instance()) {
+    const uint32_t ts = static_cast<uint32_t>(ev->timestamp());
+    const bool pressed = action != GHOSTTY_ACTION_RELEASE;
+    keycode = tracker->keycodeForEvent(ts, pressed);
+    if (keycode == 0 && action == GHOSTTY_ACTION_REPEAT)
+      keycode = tracker->lastPressedKeycode();
+  }
+  if (keycode == 0) keycode = ev->nativeScanCode();
 
   // OR in any right-side bit for this keycode (e.g. Right-Shift sets
   // SHIFT_RIGHT alongside SHIFT) so keybinds like `right_shift+x` can be
@@ -1630,6 +1634,18 @@ void GhosttySurface::sendKey(QKeyEvent *ev, ghostty_input_action_e action) {
   const ghostty_input_mods_e mods = static_cast<ghostty_input_mods_e>(
       translateMods(ev->modifiers()) |
       XkbState::instance().sideBitsForKeycode(keycode));
+
+  // libghostty derives the physical key from the hardware keycode via a
+  // static table that is blind to compositor-level xkb remaps (e.g.
+  // KDE's Caps Lock -> Escape). Resolve the layout-mapped key from the
+  // live keymap — with the event's mods applied so options keyed off a
+  // modifier (caps:escape_shifted_capslock) resolve correctly — and hand
+  // it to the core via the `key` field; the core arbitrates it against
+  // the physical keycode (Key.shouldBeRemappable), exactly like the GTK
+  // apprt. The keycode itself stays the true physical key so layout-
+  // independent binds still work.
+  const ghostty_input_key_e mappedKey =
+      XkbState::instance().keyForKeycode(keycode, mods);
 
   // XKB lookups:
   //   unshifted_codepoint — what this physical key would produce with
