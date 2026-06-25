@@ -1617,23 +1617,23 @@ void GhosttySurface::sendKey(QKeyEvent *ev, ghostty_input_action_e action) {
   }
   if (keycode == 0) keycode = ev->nativeScanCode();
 
-  // OR in any right-side bit for this keycode (e.g. Right-Shift sets
-  // SHIFT_RIGHT alongside SHIFT) so keybinds like `right_shift+x` can be
-  // distinguished from `left_shift+x`.
-  //
-  // We deliberately do NOT OR in the Caps/Num lock state here. The core's
-  // kitty encoder reports caps_lock (bit 64) and num_lock (bit 128) in the
-  // CSI-u modifier from these bits, so e.g. pressing Escape (or an XKB
-  // caps->escape remap) with Caps Lock on encodes as `CSI 27;65u` instead
-  // of a bare ESC — which nvim and friends don't recognise as Escape.
-  // Likewise every key gets `;129` while Num Lock is on. Terminals don't
-  // surface lock state as a held modifier on ordinary keys, so omitting it
-  // keeps Escape (and everything else) correctly encoded. This restores
-  // the pre-XKB-state behaviour; letter casing and ctrl+letter still work
-  // because the core lowercases via unshifted_codepoint, not this bit.
+  // Build the mods exactly like the GTK apprt's eventMods (src/apprt/gtk/
+  // key.zig): shift/ctrl/alt/super from the event, sided bits from the
+  // keycode, and — crucially — the live Caps Lock / Num Lock state. GTK
+  // reports the lock state (translateMods sets caps_lock=lock_mask, eventMods
+  // sets num_lock) and the core depends on it; stripping it here (as a prior
+  // change did) diverged from GTK and is what breaks the Caps-Lock-toggled
+  // case. The lock bits do NOT affect key resolution below — keyForKeycode's
+  // depressedMask only consults shift/ctrl/alt/super — they only ride along
+  // to the core's encoder, matching GTK byte-for-byte.
+  int lockMods = GHOSTTY_MODS_NONE;
+  if (XkbTracker *tracker = XkbTracker::instance()) {
+    if (tracker->capsLockOn()) lockMods |= GHOSTTY_MODS_CAPS;
+    if (tracker->numLockOn()) lockMods |= GHOSTTY_MODS_NUM;
+  }
   const ghostty_input_mods_e mods = static_cast<ghostty_input_mods_e>(
       translateMods(ev->modifiers()) |
-      XkbState::instance().sideBitsForKeycode(keycode));
+      XkbState::instance().sideBitsForKeycode(keycode) | lockMods);
 
   // libghostty derives the physical key from the hardware keycode via a
   // static table that is blind to compositor-level xkb remaps (e.g.
