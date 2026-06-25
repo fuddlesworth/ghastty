@@ -145,19 +145,34 @@ constexpr SymKey kKeymap[] = {
     {XKB_KEY_Super_R, GHOSTTY_KEY_META_RIGHT},
 };
 
-}  // namespace
-
-ghostty_input_key_e XkbState::keyForKeycode(uint32_t keycode) const {
-  syncFromTracker();
-  if (!m_unshifted) return GHOSTTY_KEY_UNIDENTIFIED;
-  // Base (level-0) keysym for this physical key under the live keymap.
-  // This is the post-remap identity GTK reads from the GDK keyval; an
-  // XKB user-remap (caps->escape) surfaces here as the remapped keysym.
-  const xkb_keysym_t sym = xkb_state_key_get_one_sym(m_unshifted, keycode);
+ghostty_input_key_e keyFromSym(xkb_keysym_t sym) {
   if (sym == XKB_KEY_NoSymbol) return GHOSTTY_KEY_UNIDENTIFIED;
   for (const auto &e : kKeymap)
     if (e.sym == sym) return e.key;
   return GHOSTTY_KEY_UNIDENTIFIED;
+}
+
+}  // namespace
+
+ghostty_input_key_e XkbState::keyForKeycode(uint32_t keycode,
+                                            ghostty_input_mods_e mods) const {
+  syncFromTracker();
+  if (!m_query) return GHOSTTY_KEY_UNIDENTIFIED;
+
+  // Resolve the event keysym under the live keymap with the event's
+  // depressed mods applied. This is the post-remap identity GTK reads
+  // from the GDK keyval: an XKB user-remap (caps->escape) surfaces here
+  // as the remapped keysym, and a modifier-keyed option like
+  // caps:escape_shifted_capslock resolves Shift+Caps to Caps_Lock rather
+  // than collapsing it to Escape (which a fixed level-0 lookup would).
+  XkbTracker *t = XkbTracker::instance();
+  const uint32_t group = t ? t->activeGroup() : 0;
+  xkb_state_update_mask(m_query, depressedMask(mods), 0, 0, 0, 0, group);
+  const xkb_keysym_t sym = xkb_state_key_get_one_sym(m_query, keycode);
+  // Reset so the next query starts from no-mods.
+  xkb_state_update_mask(m_query, 0, 0, 0, 0, 0, group);
+
+  return keyFromSym(sym);
 }
 
 uint32_t XkbState::unshiftedCodepoint(uint32_t keycode) const {
@@ -193,15 +208,7 @@ ghostty_input_mods_e XkbState::consumedMods(uint32_t keycode,
                                             ghostty_input_mods_e mods) const {
   syncFromTracker();
   if (!m_query) return GHOSTTY_MODS_NONE;
-  xkb_mod_mask_t depressed = 0;
-  if ((mods & GHOSTTY_MODS_SHIFT) && m_idxShift != XKB_MOD_INVALID)
-    depressed |= (1u << m_idxShift);
-  if ((mods & GHOSTTY_MODS_CTRL) && m_idxCtrl != XKB_MOD_INVALID)
-    depressed |= (1u << m_idxCtrl);
-  if ((mods & GHOSTTY_MODS_ALT) && m_idxAlt != XKB_MOD_INVALID)
-    depressed |= (1u << m_idxAlt);
-  if ((mods & GHOSTTY_MODS_SUPER) && m_idxSuper != XKB_MOD_INVALID)
-    depressed |= (1u << m_idxSuper);
+  const xkb_mod_mask_t depressed = depressedMask(mods);
   // Use the live group from the tracker so a layout switch (e.g.
   // us↔ru) takes effect immediately.
   XkbTracker *t = XkbTracker::instance();
@@ -221,6 +228,19 @@ ghostty_input_mods_e XkbState::consumedMods(uint32_t keycode,
   if (m_idxSuper != XKB_MOD_INVALID && (consumed & (1u << m_idxSuper)))
     r |= GHOSTTY_MODS_SUPER;
   return static_cast<ghostty_input_mods_e>(r);
+}
+
+xkb_mod_mask_t XkbState::depressedMask(ghostty_input_mods_e mods) const {
+  xkb_mod_mask_t depressed = 0;
+  if ((mods & GHOSTTY_MODS_SHIFT) && m_idxShift != XKB_MOD_INVALID)
+    depressed |= (1u << m_idxShift);
+  if ((mods & GHOSTTY_MODS_CTRL) && m_idxCtrl != XKB_MOD_INVALID)
+    depressed |= (1u << m_idxCtrl);
+  if ((mods & GHOSTTY_MODS_ALT) && m_idxAlt != XKB_MOD_INVALID)
+    depressed |= (1u << m_idxAlt);
+  if ((mods & GHOSTTY_MODS_SUPER) && m_idxSuper != XKB_MOD_INVALID)
+    depressed |= (1u << m_idxSuper);
+  return depressed;
 }
 
 void XkbState::syncFromTracker() const {

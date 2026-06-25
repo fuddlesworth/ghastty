@@ -9,6 +9,7 @@
 #include "SearchBar.h"
 #include "TabWidget.h"
 #include "Util.h"
+#include "XkbTracker.h"
 // Both render paths are compiled now (runtime renderer selection).
 #include "vulkan/Host.h"
 #include "opengl/EglDmabufTarget.h"
@@ -1597,39 +1598,79 @@ void GhosttySurface::sendKey(QKeyEvent *ev, ghostty_input_action_e action) {
       static_cast<unsigned char>(text.front()) >= 0x20 &&
       static_cast<unsigned char>(text.front()) != 0x7f;
 
-  // The Wayland plugin reports the XKB keycode via nativeScanCode(),
-  // which is libghostty's Linux-native input format. The XKB lookups
-  // below (text, unshifted codepoint, sided/consumed mods) all key off
-  // this physical keycode.
-  const uint32_t keycode = ev->nativeScanCode();
+  // The XKB lookups below (text, unshifted codepoint, sided/consumed
+  // mods, mapped key) all key off the physical XKB keycode. Prefer the
+  // compositor-supplied keycode from our wl_keyboard listener: Qt's
+  // nativeScanCode() is platform-plugin dependent and has been observed
+  // to be neither reliably evdev nor reliably XKB, whereas the Wayland
+  // payload is unambiguously evdev (XkbTracker stores it as evdev+8).
+  // Qt synthesizes auto-repeat events with no matching wl_keyboard.key,
+  // so fall back to the last pressed keycode for those, then finally to
+  // nativeScanCode() (e.g. early startup / non-Wayland).
+  uint32_t keycode = 0;
+  if (XkbTracker *tracker = XkbTracker::instance()) {
+    const uint32_t ts = static_cast<uint32_t>(ev->timestamp());
+    const bool pressed = action != GHOSTTY_ACTION_RELEASE;
+    keycode = tracker->keycodeForEvent(ts, pressed);
+    if (keycode == 0 && action == GHOSTTY_ACTION_REPEAT)
+      keycode = tracker->lastPressedKeycode();
+  }
+  if (keycode == 0) keycode = ev->nativeScanCode();
+
+  // Build the mods exactly like the GTK apprt's eventMods (src/apprt/gtk/
+  // key.zig): shift/ctrl/alt/super from the event, sided bits from the
+  // keycode, and — crucially — the live Caps Lock / Num Lock state. GTK
+  // reports the lock state (translateMods sets caps_lock=lock_mask, eventMods
+  // sets num_lock) and the core depends on it; stripping it here (as a prior
+  // change did) diverged from GTK and is what breaks the Caps-Lock-toggled
+  // case. The lock bits do NOT affect key resolution below — keyForKeycode's
+  // depressedMask only consults shift/ctrl/alt/super — they only ride along
+  // to the core's encoder, matching GTK byte-for-byte.
+  int lockMods = GHOSTTY_MODS_NONE;
+  if (XkbTracker *tracker = XkbTracker::instance()) {
+    if (tracker->capsLockOn()) lockMods |= GHOSTTY_MODS_CAPS;
+    if (tracker->numLockOn()) lockMods |= GHOSTTY_MODS_NUM;
+  }
+  const ghostty_input_mods_e mods = static_cast<ghostty_input_mods_e>(
+      translateMods(ev->modifiers()) |
+      XkbState::instance().sideBitsForKeycode(keycode) | lockMods);
 
   // libghostty derives the physical key from the hardware keycode via a
   // static table that is blind to compositor-level xkb remaps (e.g.
   // KDE's Caps Lock -> Escape). Resolve the layout-mapped key from the
-  // live keymap and hand it to the core via the `key` field; the core
-  // arbitrates it against the physical keycode (Key.shouldBeRemappable),
-  // exactly like the GTK apprt. The keycode itself stays the true
-  // physical key so layout-independent binds still work.
-  const ghostty_input_key_e mappedKey =
-      XkbState::instance().keyForKeycode(keycode);
+  // live keymap — with the event's mods applied so options keyed off a
+  // modifier (caps:escape_shifted_capslock) resolve correctly — and hand
+  // it to the core via the `key` field; the core arbitrates it against
+  // the physical keycode (Key.shouldBeRemappable), exactly like the GTK
+  // apprt. The keycode itself stays the true physical key so layout-
+  // independent binds still work.
+  ghostty_input_key_e mappedKey =
+      XkbState::instance().keyForKeycode(keycode, mods);
 
-  // OR in any right-side bit for this keycode (e.g. Right-Shift sets
-  // SHIFT_RIGHT alongside SHIFT) so keybinds like `right_shift+x` can be
-  // distinguished from `left_shift+x`.
-  //
-  // We deliberately do NOT OR in the Caps/Num lock state here. The core's
-  // kitty encoder reports caps_lock (bit 64) and num_lock (bit 128) in the
-  // CSI-u modifier from these bits, so e.g. pressing Escape (or an XKB
-  // caps->escape remap) with Caps Lock on encodes as `CSI 27;65u` instead
-  // of a bare ESC — which nvim and friends don't recognise as Escape.
-  // Likewise every key gets `;129` while Num Lock is on. Terminals don't
-  // surface lock state as a held modifier on ordinary keys, so omitting it
-  // keeps Escape (and everything else) correctly encoded. This restores
-  // the pre-XKB-state behaviour; letter casing and ctrl+letter still work
-  // because the core lowercases via unshifted_codepoint, not this bit.
-  const ghostty_input_mods_e mods = static_cast<ghostty_input_mods_e>(
-      translateMods(ev->modifiers()) |
-      XkbState::instance().sideBitsForKeycode(keycode));
+  // Some compositors (observed on KDE) apply a Caps Lock -> Escape remap
+  // at a layer that never reaches the Wayland XKB keymap we resolve
+  // against above, so the lookup yields the physical key (Caps_Lock) and
+  // the core encodes nothing — Escape "does nothing". Qt's logical key
+  // still reflects the remap, so trust it for Escape, the one control key
+  // a terminal can't afford to lose. We only override when the keymap
+  // didn't already identify Escape, so layouts that DO expose the remap
+  // (and the Shift+Caps disambiguation) keep going through the keymap.
+  if (mappedKey != GHOSTTY_KEY_ESCAPE && ev->key() == Qt::Key_Escape)
+    mappedKey = GHOSTTY_KEY_ESCAPE;
+
+  // TEMPORARY (strip before merge): opt-in key diagnostics so we can see
+  // exactly what each layer reports when Escape misbehaves. Off unless
+  // GHASTTY_DEBUG_KEYS is set in the environment.
+  if (qEnvironmentVariableIsSet("GHASTTY_DEBUG_KEYS")) {
+    fprintf(stderr,
+            "[ghastty key] action=%d qtKey=0x%x nativeVirtualKey=0x%x "
+            "nativeScanCode=%u keycode=%u mods=0x%x mappedKey=%d text=\"%s\"\n",
+            static_cast<int>(action), ev->key(),
+            static_cast<unsigned>(ev->nativeVirtualKey()),
+            ev->nativeScanCode(), keycode, static_cast<unsigned>(mods),
+            static_cast<int>(mappedKey),
+            text.isEmpty() ? "" : text.constData());
+  }
 
   // XKB lookups:
   //   unshifted_codepoint — what this physical key would produce with
