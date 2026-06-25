@@ -1644,8 +1644,33 @@ void GhosttySurface::sendKey(QKeyEvent *ev, ghostty_input_action_e action) {
   // the physical keycode (Key.shouldBeRemappable), exactly like the GTK
   // apprt. The keycode itself stays the true physical key so layout-
   // independent binds still work.
-  const ghostty_input_key_e mappedKey =
+  ghostty_input_key_e mappedKey =
       XkbState::instance().keyForKeycode(keycode, mods);
+
+  // Some compositors (observed on KDE) apply a Caps Lock -> Escape remap
+  // at a layer that never reaches the Wayland XKB keymap we resolve
+  // against above, so the lookup yields the physical key (Caps_Lock) and
+  // the core encodes nothing — Escape "does nothing". Qt's logical key
+  // still reflects the remap, so trust it for Escape, the one control key
+  // a terminal can't afford to lose. We only override when the keymap
+  // didn't already identify Escape, so layouts that DO expose the remap
+  // (and the Shift+Caps disambiguation) keep going through the keymap.
+  if (mappedKey != GHOSTTY_KEY_ESCAPE && ev->key() == Qt::Key_Escape)
+    mappedKey = GHOSTTY_KEY_ESCAPE;
+
+  // TEMPORARY (strip before merge): opt-in key diagnostics so we can see
+  // exactly what each layer reports when Escape misbehaves. Off unless
+  // GHASTTY_DEBUG_KEYS is set in the environment.
+  if (qEnvironmentVariableIsSet("GHASTTY_DEBUG_KEYS")) {
+    fprintf(stderr,
+            "[ghastty key] action=%d qtKey=0x%x nativeVirtualKey=0x%x "
+            "nativeScanCode=%u keycode=%u mods=0x%x mappedKey=%d text=\"%s\"\n",
+            static_cast<int>(action), ev->key(),
+            static_cast<unsigned>(ev->nativeVirtualKey()),
+            ev->nativeScanCode(), keycode, static_cast<unsigned>(mods),
+            static_cast<int>(mappedKey),
+            text.isEmpty() ? "" : text.constData());
+  }
 
   // XKB lookups:
   //   unshifted_codepoint — what this physical key would produce with
