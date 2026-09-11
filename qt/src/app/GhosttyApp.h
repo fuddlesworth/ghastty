@@ -92,8 +92,12 @@ public:
 
   // ---- libghostty runtime callbacks (registered in ensureInitialized).
   static void onWakeup(void *ud);
-  static bool onReadClipboard(void *ud, ghostty_clipboard_e, void *state);
-  static void onConfirmReadClipboard(void *ud, const char *, void *state,
+  static ghostty_clipboard_read_result_e onReadClipboard(
+      void *ud, ghostty_clipboard_e, void *state, const char *const *mimes,
+      size_t mimes_len, bool want_available);
+  static void onConfirmReadClipboard(void *ud,
+                                     const ghostty_clipboard_confirm_s *,
+                                     void *state,
                                      ghostty_clipboard_request_e);
   static void onWriteClipboard(void *ud, ghostty_clipboard_e,
                                const ghostty_clipboard_content_s *, size_t,

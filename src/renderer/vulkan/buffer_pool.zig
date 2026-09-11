@@ -41,6 +41,7 @@
 //!     pool entirely.
 
 const std = @import("std");
+const global = @import("../../global.zig");
 const vulkan = @import("vulkan");
 const vk = vulkan.c;
 
@@ -57,19 +58,19 @@ pub const Entry = struct {
 
 /// Guards the process-wide `ready` list. Per-thread `pending` is
 /// threadlocal and never under this mutex.
-var ready_mutex: std.Thread.Mutex = .{};
+var ready_mutex: std.Io.Mutex = .init;
 
 /// Per-thread pending list. Entries here were released by THIS
 /// thread during the current frame and are bounded by the
 /// fence THIS thread will wait on in `Frame.complete`. Moved
 /// to the shared `ready` list by `cycle()` after that wait
 /// returns.
-threadlocal var pending: std.ArrayList(Entry) = .{};
+threadlocal var pending: std.ArrayList(Entry) = .empty;
 
 /// Process-wide ready list. Entries here are provably retired
 /// (the bounding fence has signaled) and any thread may
 /// `acquire` them.
-var ready: std.ArrayList(Entry) = .{};
+var ready: std.ArrayList(Entry) = .empty;
 
 /// Queue a buffer for recycling. The buffer cannot be reused
 /// until the next fence-wait (handled by `cycle`); it sits in
@@ -102,8 +103,8 @@ pub fn acquire(
     usage: vk.VkBufferUsageFlags,
     min_capacity: u64,
 ) ?Entry {
-    ready_mutex.lock();
-    defer ready_mutex.unlock();
+    ready_mutex.lockUncancelable(global.io());
+    defer ready_mutex.unlock(global.io());
     var i: usize = 0;
     while (i < ready.items.len) : (i += 1) {
         const e = ready.items[i];
@@ -133,11 +134,11 @@ pub fn cycle(dev: *const Device) void {
     // across it would block every other renderer thread's
     // release/acquire/cycle. Move the pending list into a
     // local outside the lock, then drain.
-    var oom_pending: std.ArrayList(Entry) = .{};
+    var oom_pending: std.ArrayList(Entry) = .empty;
     defer oom_pending.deinit(std.heap.smp_allocator);
     {
-        ready_mutex.lock();
-        defer ready_mutex.unlock();
+        ready_mutex.lockUncancelable(global.io());
+        defer ready_mutex.unlock(global.io());
         if (ready.appendSlice(std.heap.smp_allocator, pending.items)) {
             pending.clearRetainingCapacity();
             return;
@@ -145,7 +146,7 @@ pub fn cycle(dev: *const Device) void {
             // OOM. Move THIS thread's `pending` into our local
             // so we can drain without holding the mutex.
             oom_pending = pending;
-            pending = .{};
+            pending = .empty;
         }
     }
     // Mutex released. Other threads can release/acquire/cycle
@@ -179,8 +180,8 @@ pub fn drainSelf(dev: *const Device) void {
 /// `device_refcount == 0`) and only after every other renderer
 /// thread has already run `drainSelf` on its own pending list.
 pub fn drainShared(dev: *const Device) void {
-    ready_mutex.lock();
-    defer ready_mutex.unlock();
+    ready_mutex.lockUncancelable(global.io());
+    defer ready_mutex.unlock(global.io());
     for (ready.items) |e| {
         dev.dispatch.destroyBuffer(dev.device, e.buffer, null);
         dev.dispatch.freeMemory(dev.device, e.memory, null);

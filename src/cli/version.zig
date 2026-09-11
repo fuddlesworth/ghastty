@@ -5,6 +5,7 @@ const builtin = @import("builtin");
 const build_config = @import("../build_config.zig");
 const internal_os = @import("../os/main.zig");
 const xev = @import("../global.zig").xev;
+const global = @import("../global.zig");
 
 const gtk_version = @import("../apprt/gtk/gtk_version.zig");
 const adw_version = @import("../apprt/gtk/adw_version.zig");
@@ -15,11 +16,14 @@ pub const Options = struct {};
 /// either `+version` or `--version`.
 pub fn run(alloc: Allocator) !u8 {
     var buffer: [1024]u8 = undefined;
-    const stdout_file: std.fs.File = .stdout();
-    var stdout_writer = stdout_file.writer(&buffer);
+    const stdout_file: std.Io.File = .stdout();
+    var stdout_writer = stdout_file.writer(global.io(), &buffer);
+
+    var environ_map = try global.environMap();
+    defer environ_map.deinit();
 
     const stdout = &stdout_writer.interface;
-    const tty = stdout_file.isTty();
+    const tty = try stdout_file.isTty(global.io());
 
     if (tty) if (build_config.version.build) |commit_hash| {
         try stdout.print(
@@ -47,7 +51,7 @@ pub fn run(alloc: Allocator) !u8 {
             defer if (kernel_info) |k| alloc.free(k);
             try stdout.print("  - kernel version: {s}\n", .{kernel_info orelse "Kernel information unavailable"});
         }
-        try stdout.print("  - desktop env   : {t}\n", .{internal_os.desktopEnvironment()});
+        try stdout.print("  - desktop env   : {t}\n", .{internal_os.desktopEnvironment(&environ_map)});
         try stdout.print("  - GTK version   :\n", .{});
         try stdout.print("    build         : {f}\n", .{gtk_version.comptime_version});
         try stdout.print("    runtime       : {f}\n", .{gtk_version.getRuntimeVersion()});

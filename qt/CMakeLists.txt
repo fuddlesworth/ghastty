@@ -3,22 +3,26 @@ cmake_minimum_required(VERSION 3.16)
 project(ghastty LANGUAGES CXX C)
 
 # Ghastty: a Qt6 frontend for Ghostty that embeds libghostty through its
-# C API. The renderer (OpenGL or Vulkan) is selected at RUNTIME — both
-# paths are compiled and GhosttySurface picks one via ghostty_set_renderer
-# (see its ctor). On the OpenGL path libghostty draws into a private
+# C API. The renderer (OpenGL or Vulkan) is fixed at BUILD time by
+# libghostty's `-Drenderer=` flag; GhosttySurface asks which backend was
+# compiled in via ghostty_renderer_backend() and installs the matching
+# platform_tag + callbacks (see its ctor). On the OpenGL path libghostty
+# draws into a private
 # QOpenGLContext FBO that is either exported zero-copy as a dmabuf
 # (EglDmabufTarget → wl_subsurface) or read back into a QImage; on the
 # Vulkan path frames come back as dmabuf fds (VK_KHR_external_memory_fd)
 # presented via a wl_subsurface. Terminal pixels reach the screen via a
 # subsurface (zero-copy) with the QWidget kept translucent so chrome
 # composites on top. OpenGL draws on the GUI thread (the embedded apprt's
-# mustDrawFromAppThread() is true for OpenGL).
+# must_draw_from_app_thread is true for OpenGL).
 #
 # Build libghostty first, from the repo root. Use ReleaseFast: a Debug
 # build of libghostty leaves the whole terminal core unoptimized and
-# makes rendering and surface creation noticeably sluggish.
+# makes rendering and surface creation noticeably sluggish. Pick the
+# renderer here — this is the only place it is chosen:
 #
-#   zig build -Dapp-runtime=none -Doptimize=ReleaseFast
+#   zig build -Dapp-runtime=none -Doptimize=ReleaseFast -Drenderer=opengl
+#   zig build -Dapp-runtime=none -Doptimize=ReleaseFast -Drenderer=vulkan
 #
 # Then build, run, and (optionally) install this app:
 #
@@ -127,15 +131,14 @@ get_filename_component(GHOSTTY_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
 set(GHOSTTY_LIB_DIR "${GHOSTTY_ROOT}/zig-out/lib")
 set(GHOSTTY_SO "${GHOSTTY_LIB_DIR}/ghostty-internal.so")
 
-# GHASTTY_VARIANT is OBSOLETE. The renderer is now selected at RUNTIME
-# (see GhosttySurface's ghostty_set_renderer wiring); both render paths
-# are always compiled and the linked libghostty must contain both
-# backends (`zig build -Dapp-runtime=none` on Linux). This cache var no
-# longer affects the build — it's retained only so existing
-# `-DGHASTTY_VARIANT=...` invocations don't error. The validation below
+# GHASTTY_VARIANT does not select the renderer: libghostty's `-Drenderer=`
+# does, and this app queries the result at runtime via
+# ghostty_renderer_backend(). Both C++ render paths are always compiled,
+# so the app works against either libghostty. Retained so existing
+# `-DGHASTTY_VARIANT=...` invocations don't error; the validation below
 # keeps rejecting typos for those callers.
 set(GHASTTY_VARIANT "opengl" CACHE STRING
-    "Obsolete (renderer is selected at runtime); retained for back-compat")
+    "Unused (renderer is fixed by libghostty's -Drenderer=); back-compat only)")
 set_property(CACHE GHASTTY_VARIANT PROPERTY STRINGS opengl vulkan)
 if(NOT GHASTTY_VARIANT STREQUAL "opengl" AND
    NOT GHASTTY_VARIANT STREQUAL "vulkan")
@@ -144,23 +147,21 @@ if(NOT GHASTTY_VARIANT STREQUAL "opengl" AND
     "must be 'opengl' or 'vulkan'.")
 endif()
 
-# The renderer (OpenGL vs Vulkan) is now selected at RUNTIME: both code
-# paths are compiled in and `GhosttySurface` picks per the libghostty
-# `renderer` config plus a Vulkan-availability probe, calling
-# `ghostty_set_renderer()` so the core constructs the matching backend.
-# This requires a libghostty that compiles both backends (Linux
-# `zig build -Dapp-runtime=none`). GHASTTY_VARIANT is retained only so
-# existing `-DGHASTTY_VARIANT=...` invocations don't error; it no longer
-# affects the build.
+# The renderer (OpenGL vs Vulkan) is fixed when libghostty is built
+# (`-Drenderer=`). `GhosttySurface` calls `ghostty_renderer_backend()` and
+# installs the matching platform_tag + callbacks. Both C++ render paths
+# are compiled here so one build of this app works against either
+# libghostty.
 
-# libEGL (opengl/EglDmabufTarget.cpp's zero-copy export) is now always
+# libEGL (opengl/EglDmabufTarget.cpp's zero-copy export) is always
 # required since the OpenGL path is always compiled.
 pkg_check_modules(EGL REQUIRED IMPORTED_TARGET egl)
 
 if(NOT EXISTS "${GHOSTTY_SO}")
   message(FATAL_ERROR
     "libghostty not found at ${GHOSTTY_SO}\n"
-    "Build it first from the repo root: zig build -Dapp-runtime=none")
+    "Build it first from the repo root: "
+    "zig build -Dapp-runtime=none -Drenderer=opengl  (or -Drenderer=vulkan)")
 endif()
 
 # The .so's SONAME is libghostty.so but it is installed as

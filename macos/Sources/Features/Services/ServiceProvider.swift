@@ -33,7 +33,7 @@ class ServiceProvider: NSObject {
     ) {
         guard let delegate = NSApp.delegate as? AppDelegate else { return }
 
-        guard let pathURLs = pasteboard.readObjects(forClasses: [NSURL.self]) as? [URL] else {
+        guard let pathURLs = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] else {
             error.pointee = Self.errorNoString
             return
         }
@@ -59,7 +59,7 @@ class ServiceProvider: NSObject {
 
         for url in directoryURLs {
             var config = Ghostty.SurfaceConfiguration()
-            config.workingDirectory = url.path(percentEncoded: false)
+            config.workingDirectory = url.pathWithoutTrailingSlash
 
             switch target {
             case .window:

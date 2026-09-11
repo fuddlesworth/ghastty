@@ -85,7 +85,7 @@ pub fn init(b: *std.Build, cfg: *const Config) !VulkanSpv {
         .optimize = .ReleaseFast,
     })) |glslang_dep| {
         exe.root_module.addImport("glslang", glslang_dep.module("glslang"));
-        exe.linkLibrary(glslang_dep.artifact("glslang"));
+        exe.root_module.linkLibrary(glslang_dep.artifact("glslang"));
     }
     // `vulkan` is a header-only Zig module — its build.zig only
     // calls `b.addModule(...)`, so it doesn't accept target /
@@ -126,7 +126,7 @@ pub fn init(b: *std.Build, cfg: *const Config) !VulkanSpv {
     for (shaders) |s| {
         const run = b.addRunArtifact(exe);
         run.addArgs(&.{ s.name, s.stage });
-        const captured = run.captureStdOut();
+        const captured = run.captureStdOut(.{});
         const file_name = b.fmt("{s}.spv", .{s.name});
         _ = wf.addCopyFile(captured, file_name);
         // Two declarations per shader:
@@ -138,7 +138,8 @@ pub fn init(b: *std.Build, cfg: *const Config) !VulkanSpv {
         //     bytesAsSlice (which asserts the runtime pointer's
         //     alignment matches the type's required alignment;
         //     guaranteed by the align() on _raw).
-        try module_src.writer(b.allocator).print(
+        try module_src.print(
+            b.allocator,
             \\const {0s}_raw align(@alignOf(u32)) = @embedFile("{1s}").*;
             \\pub const {0s}: []const u32 = std.mem.bytesAsSlice(u32, {0s}_raw[0..]);
             \\

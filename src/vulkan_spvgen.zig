@@ -26,24 +26,30 @@ const std = @import("std");
 const shaders = @import("renderer/vulkan/shaders.zig");
 const glslang = @import("glslang");
 
-pub fn main() !void {
-    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
+pub fn main(init: std.process.Init) !void {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
-    const args = try std.process.argsAlloc(alloc);
-    defer std.process.argsFree(alloc, args);
-
-    if (args.len != 3) {
+    var it = try init.minimal.args.iterateAllocator(alloc);
+    defer it.deinit();
+    const argv0 = it.next() orelse "vulkan_spvgen";
+    const name = it.next() orelse {
         std.debug.print(
             "usage: {s} <shader_name> <vertex|fragment>\n",
-            .{args[0]},
+            .{argv0},
         );
         std.process.exit(1);
-    }
-    const name = args[1];
-    const stage = std.meta.stringToEnum(shaders.Stage, args[2]) orelse {
-        std.debug.print("invalid stage: {s}\n", .{args[2]});
+    };
+    const stage_arg = it.next() orelse {
+        std.debug.print(
+            "usage: {s} <shader_name> <vertex|fragment>\n",
+            .{argv0},
+        );
+        std.process.exit(1);
+    };
+    const stage = std.meta.stringToEnum(shaders.Stage, stage_arg) orelse {
+        std.debug.print("invalid stage: {s}\n", .{stage_arg});
         std.process.exit(1);
     };
 
@@ -82,7 +88,7 @@ pub fn main() !void {
     // of the platform). The build step captures stdout into a .spv
     // file the renderer @embedFiles at compile time.
     var buf: [4096]u8 = undefined;
-    var stdout = std.fs.File.stdout().writerStreaming(&buf);
+    var stdout = std.Io.File.stdout().writerStreaming(init.io, &buf);
     try stdout.interface.writeAll(std.mem.sliceAsBytes(spv));
     try stdout.end();
 }

@@ -221,13 +221,17 @@ memory_properties: vk.VkPhysicalDeviceMemoryProperties,
 
 dispatch: Dispatch,
 
+/// The `std.Io` used to lock `queue_mutex`. Supplied by the embedder
+/// at `init` so this package doesn't reach into Ghostty's globals.
+io: std.Io,
+
 /// Process-wide mutex protecting access to `queue`. Vulkan requires
 /// external synchronization of `VkQueue` — `vkQueueSubmit` and
 /// `vkQueueWaitIdle` from multiple threads must not overlap. Splits
 /// and tabs share the host's single queue (one VkQueue per process),
 /// so the mutex serializes submissions across all renderer threads.
 /// Use via `Device.queueSubmit` / `Device.queueWaitIdle`.
-var queue_mutex: std.Thread.Mutex = .{};
+var queue_mutex: std.Io.Mutex = .init;
 
 /// Externally-synchronized `vkQueueSubmit`. ALL submissions to the
 /// host queue (Frame, atlas upload, etc.) MUST go through this so
@@ -239,16 +243,16 @@ pub fn queueSubmit(
     submits: [*c]const vk.VkSubmitInfo,
     fence: vk.VkFence,
 ) vk.VkResult {
-    queue_mutex.lock();
-    defer queue_mutex.unlock();
+    queue_mutex.lockUncancelable(self.io);
+    defer queue_mutex.unlock(self.io);
     return self.dispatch.queueSubmit(self.queue, submit_count, submits, fence);
 }
 
 /// Externally-synchronized `vkQueueWaitIdle`. Same reasoning as
 /// `queueSubmit`.
 pub fn queueWaitIdle(self: *const Device) vk.VkResult {
-    queue_mutex.lock();
-    defer queue_mutex.unlock();
+    queue_mutex.lockUncancelable(self.io);
+    defer queue_mutex.unlock(self.io);
     return self.dispatch.queueWaitIdle(self.queue);
 }
 
@@ -283,6 +287,7 @@ pub const HostBootstrap = struct {
 /// is a no-op stub for symmetry.
 pub fn init(
     alloc: Allocator,
+    io: std.Io,
     boot: HostBootstrap,
 ) (Error || Allocator.Error)!Device {
     const instance = boot.instance;
@@ -548,6 +553,7 @@ pub fn init(
     get_physical_device_memory_properties(physical_device, &memory_properties);
 
     return .{
+        .io = io,
         .instance = instance,
         .physical_device = physical_device,
         .device = device,

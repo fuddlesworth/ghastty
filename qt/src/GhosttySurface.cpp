@@ -108,15 +108,11 @@ GhosttySurface::GhosttySurface(ghostty_app_t app, MainWindow *owner,
   // wl_subsurface attaches to that shared parent, positioned at
   // the pane's offset within the top-level via `setPosition`.
 
-  // Pick the renderer at RUNTIME. libghostty (Linux `-Dapp-runtime=none`)
-  // now compiles both backends; we read its `renderer` config
-  // (auto|opengl|vulkan), resolve it against actual Vulkan availability,
-  // and tell the core via `ghostty_set_renderer` so it constructs the
-  // matching backend for the `platform_tag` + callbacks we install below.
-  // Decided once per process (all surfaces share the renderer — the
-  // core's active backend is process-global); later surfaces reuse it.
-  // Mixing GL+VK on one process is reportedly fragile, so it's one
-  // backend for the whole app, not per-surface.
+  // The renderer backend is fixed at BUILD time (`zig build -Drenderer=`).
+  // We ask libghostty which backend it was built with and install the
+  // matching `platform_tag` + callbacks below — the host does not get to
+  // choose. A `renderer` config naming a different backend is reported by
+  // the core as a warning.
   ghostty_surface_config_s sc =
       m_parentSurface
           ? ghostty_surface_inherited_config(m_parentSurface,
@@ -125,50 +121,17 @@ GhosttySurface::GhosttySurface(ghostty_app_t app, MainWindow *owner,
 
   static int s_useVulkan = -1;  // -1 undecided, 0 OpenGL, 1 Vulkan
   if (s_useVulkan < 0) {
-    // Read the `renderer` config (an enum, marshaled by the C API as its
-    // tag-name string). Read from the process-global app config rather
-    // than the owner window's, so this process-once decision doesn't
-    // depend on which surface happens to be constructed first. Defaults
-    // to "auto" if unreadable.
-    QByteArray want = "auto";
-    if (ghostty_config_t cfg = GhosttyApp::instance().config()) {
-      const char *r = nullptr;
-      if (ghostty_config_get(cfg, &r, "renderer", sizeof("renderer") - 1) &&
-          r != nullptr) {
-        want = r;
-      }
+    const bool use_vk = ghostty_renderer_backend() == GHOSTTY_PLATFORM_VULKAN;
+    if (use_vk && vulkan::Host::instance() == nullptr) {
+      // No fallback exists: this libghostty only contains the Vulkan
+      // renderer, so there is nothing to fall back to. Fail loudly rather
+      // than hand the core callbacks it cannot drive.
+      qFatal("[ghastty] this build requires Vulkan, but no usable Vulkan "
+             "device was found. Rebuild with -Drenderer=opengl for a "
+             "machine without Vulkan.");
     }
-    bool use_vk;
-    if (want == "opengl") {
-      // Explicit OpenGL: don't probe Vulkan at all — bringing up a
-      // Vulkan device (vkCreateInstance + device enumeration) would be
-      // wasted work and emit spurious failure logs on a system the user
-      // deliberately chose OpenGL for.
-      use_vk = false;
-    } else {
-      // Vulkan is "available" iff the host singleton brings up a Vulkan
-      // 1.3 device with the required external-memory extensions.
-      const bool vk_avail = vulkan::Host::instance() != nullptr;
-      use_vk = vk_avail;
-      if (want == "vulkan") {
-        if (!vk_avail)
-          std::fprintf(stderr,
-                       "[ghastty] renderer=vulkan but no usable Vulkan device; "
-                       "falling back to OpenGL\n");
-      } else if (want != "auto") {
-        std::fprintf(stderr,
-                     "[ghastty] unrecognized renderer=%s; using auto\n",
-                     want.constData());
-      }
-      // auto / unrecognized: prefer Vulkan when available, else OpenGL.
-    }
-    // Tell the core which backend to construct (overrides the `renderer`
-    // config it applied at app init). Must happen before our first
-    // surface's renderer initializes — which is below, in this ctor.
-    ghostty_set_renderer(use_vk ? GHOSTTY_PLATFORM_VULKAN
-                                : GHOSTTY_PLATFORM_OPENGL);
     s_useVulkan = use_vk ? 1 : 0;
-    std::fprintf(stderr, "[ghastty] renderer backend: %s\n",
+    std::fprintf(stderr, "[ghastty] renderer backend: %s (compiled in)\n",
                  use_vk ? "vulkan" : "opengl");
   }
   m_useVulkan = (s_useVulkan == 1);

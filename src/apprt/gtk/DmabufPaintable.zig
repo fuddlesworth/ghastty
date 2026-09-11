@@ -28,6 +28,7 @@
 //! built around).
 
 const std = @import("std");
+const global = @import("../../global.zig");
 const gdk = @import("gdk");
 const glib = @import("glib");
 const gobject = @import("gobject");
@@ -76,7 +77,9 @@ const Pending = union(enum) {
     /// Release the resources a parked-but-undrained frame owns.
     fn deinit(self: Pending) void {
         switch (self) {
-            .direct => |d| if (d.fd >= 0) std.posix.close(d.fd),
+            .direct => |d| if (d.fd >= 0) {
+                _ = std.os.linux.close(d.fd);
+            },
             .legacy => |l| l.bytes.unref(),
         }
     }
@@ -132,7 +135,7 @@ pub const DmabufPaintable = extern struct {
         /// finds one already pending releases the old one. Guarded by
         /// `pending_mutex`.
         pending: ?Pending = null,
-        pending_mutex: std.Thread.Mutex = .{},
+        pending_mutex: std.Io.Mutex = .init,
 
         /// The widget whose `GdkFrameClock` paces our drain — the
         /// `present_picture` we're attached to. Set at surface init
@@ -210,10 +213,10 @@ pub const DmabufPaintable = extern struct {
             priv.tick_id = 0;
         }
 
-        priv.pending_mutex.lock();
+        priv.pending_mutex.lockUncancelable(global.io());
         priv.stopped = true;
         priv.tick_live = false;
-        priv.pending_mutex.unlock();
+        priv.pending_mutex.unlock(global.io());
 
         priv.picture = null;
     }
@@ -310,7 +313,7 @@ pub const DmabufPaintable = extern struct {
     fn park(self: *DmabufPaintable, frame: Pending) void {
         const priv = privateOf(self);
 
-        priv.pending_mutex.lock();
+        priv.pending_mutex.lockUncancelable(global.io());
         const old = priv.pending;
         priv.pending = frame;
         priv.has_presented = true;
@@ -319,7 +322,7 @@ pub const DmabufPaintable = extern struct {
         // park just refreshes `pending` for the next tick.
         const need_arm = !priv.tick_live and !priv.stopped;
         if (need_arm) priv.tick_live = true;
-        priv.pending_mutex.unlock();
+        priv.pending_mutex.unlock(global.io());
 
         // Release a superseded frame outside the lock.
         if (old) |o| o.deinit();
@@ -345,18 +348,18 @@ pub const DmabufPaintable = extern struct {
         // Torn down between the park and now: do nothing (the widget may
         // already be freed). `stop()` cleared `tick_live`.
         {
-            priv.pending_mutex.lock();
+            priv.pending_mutex.lockUncancelable(global.io());
             const stopped = priv.stopped;
-            priv.pending_mutex.unlock();
+            priv.pending_mutex.unlock(global.io());
             if (stopped) return;
         }
 
         // No driver widget yet, or already ticking: nothing to do.
         // If we can't arm, clear `tick_live` so a later park retries.
         const picture = priv.picture orelse {
-            priv.pending_mutex.lock();
+            priv.pending_mutex.lockUncancelable(global.io());
             priv.tick_live = false;
-            priv.pending_mutex.unlock();
+            priv.pending_mutex.unlock(global.io());
             return;
         };
         if (priv.tick_id != 0) return;
@@ -396,14 +399,14 @@ pub const DmabufPaintable = extern struct {
         // `tick_live` (so the next park re-arms) and `tick_id` (so
         // `armTickIdle` knows we stopped); the destroy notify drops the
         // tick's ref after we return.
-        priv.pending_mutex.lock();
+        priv.pending_mutex.lockUncancelable(global.io());
         if (priv.pending != null) {
-            priv.pending_mutex.unlock();
+            priv.pending_mutex.unlock(global.io());
             priv.idle_ticks = 0;
             return @intFromBool(glib.SOURCE_CONTINUE);
         }
         priv.tick_live = false;
-        priv.pending_mutex.unlock();
+        priv.pending_mutex.unlock(global.io());
         priv.tick_id = 0;
         return @intFromBool(glib.SOURCE_REMOVE);
     }
@@ -423,10 +426,10 @@ pub const DmabufPaintable = extern struct {
     pub fn drainPending(self: *DmabufPaintable) bool {
         const priv = privateOf(self);
 
-        priv.pending_mutex.lock();
+        priv.pending_mutex.lockUncancelable(global.io());
         const frame = priv.pending;
         priv.pending = null;
-        priv.pending_mutex.unlock();
+        priv.pending_mutex.unlock(global.io());
 
         return switch (frame orelse return false) {
             .direct => |d| self.installDirect(d),
@@ -439,8 +442,8 @@ pub const DmabufPaintable = extern struct {
     /// renderer thread has produced its first frame.
     pub fn hasPresented(self: *DmabufPaintable) bool {
         const priv = privateOf(self);
-        priv.pending_mutex.lock();
-        defer priv.pending_mutex.unlock();
+        priv.pending_mutex.lockUncancelable(global.io());
+        defer priv.pending_mutex.unlock(global.io());
         return priv.has_presented;
     }
 
@@ -450,7 +453,7 @@ pub const DmabufPaintable = extern struct {
     ) bool {
         const display = gdk.Display.getDefault() orelse {
             log.warn("drain: no default display; dropping frame", .{});
-            std.posix.close(d.fd);
+            _ = std.os.linux.close(d.fd);
             return false;
         };
 
@@ -482,7 +485,7 @@ pub const DmabufPaintable = extern struct {
             if (gerr) |e| e.free();
             // The destroy notify did NOT fire on build failure —
             // close the dup'd fd ourselves to avoid a leak.
-            std.posix.close(d.fd);
+            _ = std.os.linux.close(d.fd);
             return false;
         }
 
@@ -515,7 +518,9 @@ pub const DmabufPaintable = extern struct {
     /// `data` is the fd cast to a pointer (never deref'd as one).
     fn fdDestroyNotify(data: ?*anyopaque) callconv(.c) void {
         const fd: i32 = @intCast(@intFromPtr(data));
-        if (fd >= 0) std.posix.close(fd);
+        if (fd >= 0) {
+            _ = std.os.linux.close(fd);
+        }
     }
 
     fn init(self: *DmabufPaintable, _: *Class) callconv(.c) void {
@@ -532,10 +537,10 @@ pub const DmabufPaintable = extern struct {
         // ref on us, so by construction finalize only runs after it
         // has fired and dropped that ref — `pending` here is whatever
         // the last drain left, normally null.
-        priv.pending_mutex.lock();
+        priv.pending_mutex.lockUncancelable(global.io());
         const pending = priv.pending;
         priv.pending = null;
-        priv.pending_mutex.unlock();
+        priv.pending_mutex.unlock(global.io());
         if (pending) |p| p.deinit();
 
         if (priv.texture) |t| {

@@ -459,7 +459,7 @@ fn initDirect(opts: Options, drm_format: u32, chosen_mod: u64) Error!Self {
 
     // ---- 4. Export memory as dmabuf fd -----------------------------
     const fd = try exportDmabufFd(dev, image_memory);
-    errdefer std.posix.close(fd);
+    errdefer _ = std.os.linux.close(fd);
 
     // ---- 5. Confirm the actual modifier + plane layout -------------
     // For non-LINEAR we used LIST create-info (one entry), so the
@@ -676,7 +676,7 @@ fn initLegacyCopy(opts: Options, drm_format: u32) Error!Self {
     }
 
     const fd = try exportDmabufFd(dev, dmabuf_memory);
-    errdefer std.posix.close(fd);
+    errdefer _ = std.os.linux.close(fd);
 
     return .{
         .device = dev,
@@ -748,7 +748,9 @@ fn exportDmabufFd(dev: *const Device, memory: vk.VkDeviceMemory) Error!i32 {
 
 pub fn deinit(self: *Self) void {
     const dev = self.device;
-    if (self.fd >= 0) std.posix.close(self.fd);
+    if (self.fd >= 0) {
+        _ = std.os.linux.close(self.fd);
+    }
     if (self.dmabuf_buffer) |b| dev.dispatch.destroyBuffer(dev.device, b, null);
     if (self.dmabuf_memory) |m| dev.dispatch.freeMemory(dev.device, m, null);
     dev.dispatch.destroyImageView(dev.device, self.view, null);

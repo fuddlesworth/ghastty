@@ -215,7 +215,7 @@ pub fn vulkanizeGlsl(
     // unnormalized samplers and reads the same texel at LOD 0 for our
     // non-mipmapped atlases.
     const pass1 = pass1: {
-        var out = std.ArrayList(u8){};
+        var out = std.ArrayList(u8).empty;
         errdefer out.deinit(alloc);
 
         var i: usize = 0;
@@ -308,7 +308,7 @@ pub fn vulkanizeGlsl(
     // Second pass: layout(...) qualifier rewrites. We need the rect→2D
     // rename from pass 1 to have already happened so that the
     // resource-type sniff sees `sampler2D` rather than `sampler2DRect`.
-    var out = std.ArrayList(u8){};
+    var out = std.ArrayList(u8).empty;
     errdefer out.deinit(alloc);
 
     var i: usize = 0;
@@ -377,7 +377,7 @@ pub fn vulkanizeGlsl(
 
             // Emit: `layout(set = <S>, <body>)`.
             try out.appendSlice(alloc, "layout(set = ");
-            try out.writer(alloc).print("{d}", .{@intFromEnum(set)});
+            try out.print(alloc, "{d}", .{@intFromEnum(set)});
             try out.appendSlice(alloc, ", ");
             try out.appendSlice(alloc, body);
             try out.append(alloc, ')');

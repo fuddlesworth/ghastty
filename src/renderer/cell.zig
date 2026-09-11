@@ -1,236 +1,219 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const assert = @import("../quirks.zig").inlineAssert;
-const build_config = @import("../build_config.zig");
 const font = @import("../font/main.zig");
 const terminal = @import("../terminal/main.zig");
 const renderer = @import("../renderer.zig");
-const ArrayListCollection = @import("../datastruct/array_list_collection.zig").ArrayListCollection;
+const shaderpkg = renderer.Renderer.API.shaders;
 const symbols = @import("../unicode/symbols_table.zig").table;
 
-/// The cell types that depend on the graphics API's shader cell formats
-/// (`shaderpkg.CellBg` / `shaderpkg.CellText`). Parameterized over the
-/// shader package so each renderer backend gets its own instantiation —
-/// required now that the renderer can be selected at runtime and both
-/// backends' types coexist in one binary (there is no single global
-/// `renderer.Renderer.API` to read the shader package from anymore).
+const CellTextRow = std.ArrayListUnmanaged(shaderpkg.CellText);
+
+/// The possible cell content keys that exist.
+pub const Key = enum {
+    bg,
+    text,
+    underline,
+    strikethrough,
+    overline,
+
+    /// Returns the GPU vertex type for this key.
+    pub fn CellType(self: Key) type {
+        return switch (self) {
+            .bg => shaderpkg.CellBg,
+
+            .text,
+            .underline,
+            .strikethrough,
+            .overline,
+            => shaderpkg.CellText,
+        };
+    }
+};
+
+/// The contents of all the cells in the terminal.
 ///
-/// `generic.zig` instantiates this with its `GraphicsAPI.shaders`. The
-/// backend-independent helpers below (`isCovering`, `constraintWidth`,
-/// `noMinContrast`, …) stay at module scope.
-pub fn Cell(comptime shaderpkg: type) type {
-    return struct {
-        /// The possible cell content keys that exist.
-        pub const Key = enum {
-            bg,
-            text,
-            underline,
-            strikethrough,
-            overline,
+/// The goal of this data structure is to allow for efficient row-wise
+/// clearing of data from the GPU buffers, to allow for row-wise dirty
+/// tracking to eliminate the overhead of rebuilding the GPU buffers
+/// each frame.
+///
+/// Must be initialized by resizing before calling any operations.
+pub const Contents = struct {
+    size: renderer.GridSize = .{ .rows = 0, .columns = 0 },
 
-            /// Returns the GPU vertex type for this key.
-            pub fn CellType(self: Key) type {
-                return switch (self) {
-                    .bg => shaderpkg.CellBg,
+    /// Flat array containing cell background colors for the terminal grid.
+    ///
+    /// Indexed as `bg_cells[row * size.columns + col]`.
+    ///
+    /// Prefer accessing with `Contents.bgCell(row, col).*` instead
+    /// of directly indexing in order to avoid integer size bugs.
+    bg_cells: []shaderpkg.CellBg = &.{},
 
-                    .text,
-                    .underline,
-                    .strikethrough,
-                    .overline,
-                    => shaderpkg.CellText,
-                };
-            }
-        };
+    /// The lists which hold all of the foreground cells. When sized with
+    /// Contents.resize the individual ArrayLists are given enough room that
+    /// they can hold a single row with #cols glyphs, underlines, and
+    /// strikethroughs; however, appendAssumeCapacity MUST NOT be used since
+    /// it is possible to exceed this with combining glyphs that add a glyph
+    /// but take up no column since they combine with the previous one, as
+    /// well as with fonts that perform multi-substitutions for glyphs, which
+    /// can result in a similar situation where multiple glyphs reside in the
+    /// same column.
+    ///
+    /// Allocations should nevertheless be exceedingly rare since hitting the
+    /// initial capacity of a list would require a row filled with underlined
+    /// struck through characters, at least one of which is a multi-glyph
+    /// composite.
+    ///
+    /// Rows are indexed as Contents.fg_rows[y + 1], because the first list in
+    /// the collection is reserved for the cursor, which must be the first item
+    /// in the buffer.
+    ///
+    /// Must be initialized by calling resize on the Contents struct before
+    /// calling any operations.
+    fg_rows: []CellTextRow = &.{},
 
-        /// The contents of all the cells in the terminal.
-        ///
-        /// The goal of this data structure is to allow for efficient row-wise
-        /// clearing of data from the GPU buffers, to allow for row-wise dirty
-        /// tracking to eliminate the overhead of rebuilding the GPU buffers
-        /// each frame.
-        ///
-        /// Must be initialized by resizing before calling any operations.
-        pub const Contents = struct {
-            size: renderer.GridSize = .{ .rows = 0, .columns = 0 },
+    pub fn deinit(self: *Contents, alloc: Allocator) void {
+        alloc.free(self.bg_cells);
+        for (self.fg_rows) |*row| row.deinit(alloc);
+        alloc.free(self.fg_rows);
+    }
 
-            /// Flat array containing cell background colors for the terminal grid.
-            ///
-            /// Indexed as `bg_cells[row * size.columns + col]`.
-            ///
-            /// Prefer accessing with `Contents.bgCell(row, col).*` instead
-            /// of directly indexing in order to avoid integer size bugs.
-            bg_cells: []shaderpkg.CellBg = undefined,
+    /// Resize the cell contents for the given grid size. This will
+    /// always invalidate the entire cell contents.
+    pub fn resize(
+        self: *Contents,
+        alloc: Allocator,
+        size: renderer.GridSize,
+    ) Allocator.Error!void {
+        const row_count: usize = size.rows;
 
-            /// The ArrayListCollection which holds all of the foreground cells. When
-            /// sized with Contents.resize the individual ArrayLists are given enough
-            /// room that they can hold a single row with #cols glyphs, underlines, and
-            /// strikethroughs; however, appendAssumeCapacity MUST NOT be used since
-            /// it is possible to exceed this with combining glyphs that add a glyph
-            /// but take up no column since they combine with the previous one, as
-            /// well as with fonts that perform multi-substitutions for glyphs, which
-            /// can result in a similar situation where multiple glyphs reside in the
-            /// same column.
-            ///
-            /// Allocations should nevertheless be exceedingly rare since hitting the
-            /// initial capacity of a list would require a row filled with underlined
-            /// struck through characters, at least one of which is a multi-glyph
-            /// composite.
-            ///
-            /// Rows are indexed as Contents.fg_rows[y + 1], because the first list in
-            /// the collection is reserved for the cursor, which must be the first item
-            /// in the buffer.
-            ///
-            /// Must be initialized by calling resize on the Contents struct before
-            /// calling any operations.
-            fg_rows: ArrayListCollection(shaderpkg.CellText) = .{ .lists = &.{} },
+        // The two extra lists hold cursor cells: index 0 is drawn before the
+        // row contents, and index row_count + 1 is drawn after them.
+        const fg_rows = try alloc.alloc(CellTextRow, row_count + 2);
+        @memset(fg_rows, .empty);
+        errdefer {
+            for (fg_rows) |*row| row.deinit(alloc);
+            alloc.free(fg_rows);
+        }
 
-            pub fn deinit(self: *Contents, alloc: Allocator) void {
-                alloc.free(self.bg_cells);
-                self.fg_rows.deinit(alloc);
-            }
+        // Foreground rows hold glyphs plus underlines, overlines, and
+        // strikethroughs. Three entries per column cover the common cases
+        // without reserving space for every decoration combination. We can't
+        // assume this capacity because combining glyphs and font substitutions
+        // can produce arbitrarily many glyphs in one column.
+        const fg_row_capacity = @as(usize, size.columns) * 3;
 
-            /// Resize the cell contents for the given grid size. This will
-            /// always invalidate the entire cell contents.
-            pub fn resize(
-                self: *Contents,
-                alloc: Allocator,
-                size: renderer.GridSize,
-            ) Allocator.Error!void {
-                self.size = size;
+        // The cursor lists need just one cell. The rest get the full capacity.
+        fg_rows[0] = try .initCapacity(alloc, 1);
+        fg_rows[row_count + 1] = try .initCapacity(alloc, 1);
+        for (fg_rows[1 .. row_count + 1]) |*row| {
+            row.* = try .initCapacity(alloc, fg_row_capacity);
+        }
 
-                const cell_count = @as(usize, size.columns) * @as(usize, size.rows);
+        const bg_cells = try alloc.realloc(
+            self.bg_cells,
+            row_count * @as(usize, size.columns),
+        );
 
-                const bg_cells = try alloc.alloc(shaderpkg.CellBg, cell_count);
-                errdefer alloc.free(bg_cells);
-                @memset(bg_cells, .{ 0, 0, 0, 0 });
+        // Perform the swap, no going back from here.
+        errdefer comptime unreachable;
+        for (self.fg_rows) |*row| row.deinit(alloc);
+        alloc.free(self.fg_rows);
+        self.size = size;
+        self.bg_cells = bg_cells;
+        self.fg_rows = fg_rows;
+        self.reset();
+    }
 
-                // The foreground lists can hold 3 types of items:
-                // - Glyphs
-                // - Underlines
-                // - Strikethroughs
-                // So we give them an initial capacity of size.columns * 3, which will
-                // avoid any further allocations in the vast majority of cases. Sadly
-                // we can not assume capacity though, since with combining glyphs that
-                // form a single grapheme, and multi-substitutions in fonts, the number
-                // of glyphs in a row is theoretically unlimited.
-                //
-                // We have size.rows + 2 lists because indexes 0 and size.rows - 1 are
-                // used for special lists containing the cursor cell which need to
-                // be first and last in the buffer, respectively.
-                var fg_rows: ArrayListCollection(shaderpkg.CellText) = try .init(
-                    alloc,
-                    size.rows + 2,
-                    size.columns * 3,
-                );
-                errdefer fg_rows.deinit(alloc);
+    /// Reset the cell contents to an empty state without resizing.
+    pub fn reset(self: *Contents) void {
+        @memset(self.bg_cells, .{ 0, 0, 0, 0 });
+        for (self.fg_rows) |*row| row.clearRetainingCapacity();
+    }
 
-                // We don't need 3*cols worth of cells for the cursor lists, so we can
-                // replace them with smaller lists. This is technically a tiny bit of
-                // extra work but resize is not a hot function so it's worth it to not
-                // waste the memory.
-                fg_rows.lists[0].deinit(alloc);
-                fg_rows.lists[0] = try .initCapacity(alloc, 1);
-                fg_rows.lists[size.rows + 1].deinit(alloc);
-                fg_rows.lists[size.rows + 1] = try .initCapacity(alloc, 1);
+    /// Set the cursor value. If the value is null then the cursor is hidden.
+    pub fn setCursor(
+        self: *Contents,
+        v: ?shaderpkg.CellText,
+        cursor_style: ?renderer.CursorStyle,
+    ) void {
+        if (self.size.rows == 0) return;
+        self.fg_rows[0].clearRetainingCapacity();
+        self.fg_rows[self.size.rows + 1].clearRetainingCapacity();
 
-                // Perform the swap, no going back from here.
-                errdefer comptime unreachable;
-                alloc.free(self.bg_cells);
-                self.fg_rows.deinit(alloc);
-                self.bg_cells = bg_cells;
-                self.fg_rows = fg_rows;
-            }
+        const cell = v orelse return;
+        const style = cursor_style orelse return;
 
-            /// Reset the cell contents to an empty state without resizing.
-            pub fn reset(self: *Contents) void {
-                @memset(self.bg_cells, .{ 0, 0, 0, 0 });
-                self.fg_rows.reset();
-            }
+        switch (style) {
+            // Block cursors should be drawn first
+            .block => self.fg_rows[0].appendAssumeCapacity(cell),
+            // Other cursor styles should be drawn last
+            .block_hollow, .bar, .underline, .lock => self.fg_rows[self.size.rows + 1].appendAssumeCapacity(cell),
+        }
+    }
 
-            /// Set the cursor value. If the value is null then the cursor is hidden.
-            pub fn setCursor(
-                self: *Contents,
-                v: ?shaderpkg.CellText,
-                cursor_style: ?renderer.CursorStyle,
-            ) void {
-                if (self.size.rows == 0) return;
-                self.fg_rows.lists[0].clearRetainingCapacity();
-                self.fg_rows.lists[self.size.rows + 1].clearRetainingCapacity();
+    /// Returns the current cursor glyph if present, checking both cursor lists.
+    pub fn getCursorGlyph(self: *Contents) ?shaderpkg.CellText {
+        if (self.size.rows == 0) return null;
+        if (self.fg_rows[0].items.len > 0) {
+            return self.fg_rows[0].items[0];
+        }
+        if (self.fg_rows[self.size.rows + 1].items.len > 0) {
+            return self.fg_rows[self.size.rows + 1].items[0];
+        }
+        return null;
+    }
 
-                const cell = v orelse return;
-                const style = cursor_style orelse return;
+    /// Access a background cell. Prefer this function over direct indexing
+    /// of `bg_cells` in order to avoid integer size bugs causing overflows.
+    pub inline fn bgCell(
+        self: *Contents,
+        row: usize,
+        col: usize,
+    ) *shaderpkg.CellBg {
+        return &self.bg_cells[row * self.size.columns + col];
+    }
 
-                switch (style) {
-                    // Block cursors should be drawn first
-                    .block => self.fg_rows.lists[0].appendAssumeCapacity(cell),
-                    // Other cursor styles should be drawn last
-                    .block_hollow, .bar, .underline, .lock => self.fg_rows.lists[self.size.rows + 1].appendAssumeCapacity(cell),
-                }
-            }
+    /// Add a cell to the appropriate list. Adding the same cell twice will
+    /// result in duplication in the vertex buffer. The caller should clear
+    /// the corresponding row with Contents.clear to remove old cells first.
+    pub fn add(
+        self: *Contents,
+        alloc: Allocator,
+        comptime key: Key,
+        cell: key.CellType(),
+    ) Allocator.Error!void {
+        const y = cell.grid_pos[1];
 
-            /// Returns the current cursor glyph if present, checking both cursor lists.
-            pub fn getCursorGlyph(self: *Contents) ?shaderpkg.CellText {
-                if (self.size.rows == 0) return null;
-                if (self.fg_rows.lists[0].items.len > 0) {
-                    return self.fg_rows.lists[0].items[0];
-                }
-                if (self.fg_rows.lists[self.size.rows + 1].items.len > 0) {
-                    return self.fg_rows.lists[self.size.rows + 1].items[0];
-                }
-                return null;
-            }
+        assert(y < self.size.rows);
 
-            /// Access a background cell. Prefer this function over direct indexing
-            /// of `bg_cells` in order to avoid integer size bugs causing overflows.
-            pub inline fn bgCell(
-                self: *Contents,
-                row: usize,
-                col: usize,
-            ) *shaderpkg.CellBg {
-                return &self.bg_cells[row * self.size.columns + col];
-            }
+        switch (key) {
+            .bg => comptime unreachable,
 
-            /// Add a cell to the appropriate list. Adding the same cell twice will
-            /// result in duplication in the vertex buffer. The caller should clear
-            /// the corresponding row with Contents.clear to remove old cells first.
-            pub fn add(
-                self: *Contents,
-                alloc: Allocator,
-                comptime key: Key,
-                cell: key.CellType(),
-            ) Allocator.Error!void {
-                const y = cell.grid_pos[1];
+            .text,
+            .underline,
+            .strikethrough,
+            .overline,
+            // We have a special list containing the cursor cell at the start
+            // of our fg row collection, so we need to add 1 to the y to get
+            // the correct index.
+            => try self.fg_rows[y + 1].append(alloc, cell),
+        }
+    }
 
-                assert(y < self.size.rows);
+    /// Clear all of the cell contents for a given row.
+    pub fn clear(self: *Contents, y: terminal.size.CellCountInt) void {
+        assert(y < self.size.rows);
 
-                switch (key) {
-                    .bg => comptime unreachable,
+        @memset(self.bg_cells[@as(usize, y) * self.size.columns ..][0..self.size.columns], .{ 0, 0, 0, 0 });
 
-                    .text,
-                    .underline,
-                    .strikethrough,
-                    .overline,
-                    // We have a special list containing the cursor cell at the start
-                    // of our fg row collection, so we need to add 1 to the y to get
-                    // the correct index.
-                    => try self.fg_rows.lists[y + 1].append(alloc, cell),
-                }
-            }
-
-            /// Clear all of the cell contents for a given row.
-            pub fn clear(self: *Contents, y: terminal.size.CellCountInt) void {
-                assert(y < self.size.rows);
-
-                @memset(self.bg_cells[@as(usize, y) * self.size.columns ..][0..self.size.columns], .{ 0, 0, 0, 0 });
-
-                // We have a special list containing the cursor cell at the start
-                // of our fg row collection, so we need to add 1 to the y to get
-                // the correct index.
-                self.fg_rows.lists[y + 1].clearRetainingCapacity();
-            }
-        };
-    };
-}
+        // We have a special list containing the cursor cell at the start
+        // of our fg row collection, so we need to add 1 to the y to get
+        // the correct index.
+        self.fg_rows[y + 1].clearRetainingCapacity();
+    }
+};
 
 /// Returns true if a codepoint for a cell is a covering character. A covering
 /// character is a character that covers the entire cell. This is used to
@@ -363,46 +346,31 @@ fn isPowerline(char: u21) bool {
     };
 }
 
-// ---- Tests ----------------------------------------------------------
-//
-// The backend-specific `Contents`/`Key` tests instantiate `Cell` with a
-// concrete shader package. We pick it from `build_config.renderer` (the
-// build's default/primary backend) rather than a runtime-selected
-// `Renderer`, so these stay valid regardless of runtime selection.
-
-const test_shaders = switch (build_config.renderer) {
-    .opengl => renderer.OpenGL.shaders,
-    .metal => renderer.Metal.shaders,
-    .vulkan => renderer.Vulkan.shaders,
-    .webgl => @compileError("webgl has no cell shader types for tests"),
-};
-const TestContents = Cell(test_shaders).Contents;
-
-test TestContents {
+test Contents {
     const testing = std.testing;
     const alloc = testing.allocator;
 
     const rows = 10;
     const cols = 10;
 
-    var c: TestContents = .{};
+    var c: Contents = .{};
     try c.resize(alloc, .{ .rows = rows, .columns = cols });
     defer c.deinit(alloc);
 
     // We should start off empty after resizing.
     for (0..rows) |y| {
-        try testing.expect(c.fg_rows.lists[y + 1].items.len == 0);
+        try testing.expect(c.fg_rows[y + 1].items.len == 0);
         for (0..cols) |x| {
             try testing.expectEqual(.{ 0, 0, 0, 0 }, c.bgCell(y, x).*);
         }
     }
     // And the cursor row should have a capacity of 1 and also be empty.
-    try testing.expect(c.fg_rows.lists[0].capacity == 1);
-    try testing.expect(c.fg_rows.lists[0].items.len == 0);
+    try testing.expect(c.fg_rows[0].capacity == 1);
+    try testing.expect(c.fg_rows[0].items.len == 0);
 
     // Add some contents.
-    const bg_cell: test_shaders.CellBg = .{ 0, 0, 0, 1 };
-    const fg_cell: test_shaders.CellText = .{
+    const bg_cell: shaderpkg.CellBg = .{ 0, 0, 0, 1 };
+    const fg_cell: shaderpkg.CellText = .{
         .atlas = .grayscale,
         .grid_pos = .{ 4, 1 },
         .color = .{ 0, 0, 0, 1 },
@@ -411,37 +379,66 @@ test TestContents {
     try c.add(alloc, .text, fg_cell);
     try testing.expectEqual(bg_cell, c.bgCell(1, 4).*);
     // The fg row index is offset by 1 because of the cursor list.
-    try testing.expectEqual(fg_cell, c.fg_rows.lists[2].items[0]);
+    try testing.expectEqual(fg_cell, c.fg_rows[2].items[0]);
 
     // And we should be able to clear it.
     c.clear(1);
     for (0..rows) |y| {
-        try testing.expect(c.fg_rows.lists[y + 1].items.len == 0);
+        try testing.expect(c.fg_rows[y + 1].items.len == 0);
         for (0..cols) |x| {
             try testing.expectEqual(.{ 0, 0, 0, 0 }, c.bgCell(y, x).*);
         }
     }
 
     // Add a block cursor.
-    const cursor_cell: test_shaders.CellText = .{
+    const cursor_cell: shaderpkg.CellText = .{
         .atlas = .grayscale,
         .bools = .{ .is_cursor_glyph = true },
         .grid_pos = .{ 2, 3 },
         .color = .{ 0, 0, 0, 1 },
     };
     c.setCursor(cursor_cell, .block);
-    try testing.expectEqual(cursor_cell, c.fg_rows.lists[0].items[0]);
+    try testing.expectEqual(cursor_cell, c.fg_rows[0].items[0]);
     try testing.expectEqual(cursor_cell, c.getCursorGlyph().?);
 
     // And remove it.
     c.setCursor(null, null);
-    try testing.expectEqual(0, c.fg_rows.lists[0].items.len);
+    try testing.expectEqual(0, c.fg_rows[0].items.len);
     try testing.expect(c.getCursorGlyph() == null);
 
     // Add a hollow cursor.
     c.setCursor(cursor_cell, .block_hollow);
-    try testing.expectEqual(cursor_cell, c.fg_rows.lists[rows + 1].items[0]);
+    try testing.expectEqual(cursor_cell, c.fg_rows[rows + 1].items[0]);
     try testing.expectEqual(cursor_cell, c.getCursorGlyph().?);
+}
+
+test "Contents resize grows and shrinks" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var c: Contents = .{};
+    defer c.deinit(alloc);
+
+    try c.resize(alloc, .{ .rows = 2, .columns = 2 });
+    var cell: shaderpkg.CellText = .{
+        .atlas = .grayscale,
+        .grid_pos = .{ 1, 1 },
+        .color = .{ 0, 0, 0, 1 },
+    };
+    try c.add(alloc, .text, cell);
+    c.bgCell(1, 1).* = .{ 0, 0, 0, 1 };
+    c.setCursor(cell, .bar);
+
+    try c.resize(alloc, .{ .rows = 3, .columns = 4 });
+    try testing.expectEqual(.{ 0, 0, 0, 0 }, c.bgCell(1, 1).*);
+    try testing.expectEqual(@as(usize, 0), c.fg_rows[2].items.len);
+    try testing.expectEqual(@as(?shaderpkg.CellText, null), c.getCursorGlyph());
+    cell.grid_pos = .{ 3, 2 };
+    try c.add(alloc, .text, cell);
+
+    try c.resize(alloc, .{ .rows = 1, .columns = 1 });
+    cell.grid_pos = .{ 0, 0 };
+    try c.add(alloc, .text, cell);
 }
 
 test "Contents clear retains other content" {
@@ -451,14 +448,14 @@ test "Contents clear retains other content" {
     const rows = 10;
     const cols = 10;
 
-    var c: TestContents = .{};
+    var c: Contents = .{};
     try c.resize(alloc, .{ .rows = rows, .columns = cols });
     defer c.deinit(alloc);
 
     // Set some contents
     // bg and fg cells in row 1
-    const bg_cell_1: test_shaders.CellBg = .{ 0, 0, 0, 1 };
-    const fg_cell_1: test_shaders.CellText = .{
+    const bg_cell_1: shaderpkg.CellBg = .{ 0, 0, 0, 1 };
+    const fg_cell_1: shaderpkg.CellText = .{
         .atlas = .grayscale,
         .grid_pos = .{ 4, 1 },
         .color = .{ 0, 0, 0, 1 },
@@ -466,8 +463,8 @@ test "Contents clear retains other content" {
     c.bgCell(1, 4).* = bg_cell_1;
     try c.add(alloc, .text, fg_cell_1);
     // bg and fg cells in row 2
-    const bg_cell_2: test_shaders.CellBg = .{ 0, 0, 0, 1 };
-    const fg_cell_2: test_shaders.CellText = .{
+    const bg_cell_2: shaderpkg.CellBg = .{ 0, 0, 0, 1 };
+    const fg_cell_2: shaderpkg.CellText = .{
         .atlas = .grayscale,
         .grid_pos = .{ 4, 2 },
         .color = .{ 0, 0, 0, 1 },
@@ -481,7 +478,7 @@ test "Contents clear retains other content" {
     // Row 2 should still contain its cells.
     try testing.expectEqual(bg_cell_2, c.bgCell(2, 4).*);
     // Fg row index is +1 because of cursor list at start
-    try testing.expectEqual(fg_cell_2, c.fg_rows.lists[3].items[0]);
+    try testing.expectEqual(fg_cell_2, c.fg_rows[3].items[0]);
 }
 
 test "Contents clear last added content" {
@@ -491,14 +488,14 @@ test "Contents clear last added content" {
     const rows = 10;
     const cols = 10;
 
-    var c: TestContents = .{};
+    var c: Contents = .{};
     try c.resize(alloc, .{ .rows = rows, .columns = cols });
     defer c.deinit(alloc);
 
     // Set some contents
     // bg and fg cells in row 1
-    const bg_cell_1: test_shaders.CellBg = .{ 0, 0, 0, 1 };
-    const fg_cell_1: test_shaders.CellText = .{
+    const bg_cell_1: shaderpkg.CellBg = .{ 0, 0, 0, 1 };
+    const fg_cell_1: shaderpkg.CellText = .{
         .atlas = .grayscale,
         .grid_pos = .{ 4, 1 },
         .color = .{ 0, 0, 0, 1 },
@@ -506,8 +503,8 @@ test "Contents clear last added content" {
     c.bgCell(1, 4).* = bg_cell_1;
     try c.add(alloc, .text, fg_cell_1);
     // bg and fg cells in row 2
-    const bg_cell_2: test_shaders.CellBg = .{ 0, 0, 0, 1 };
-    const fg_cell_2: test_shaders.CellText = .{
+    const bg_cell_2: shaderpkg.CellBg = .{ 0, 0, 0, 1 };
+    const fg_cell_2: shaderpkg.CellText = .{
         .atlas = .grayscale,
         .grid_pos = .{ 4, 2 },
         .color = .{ 0, 0, 0, 1 },
@@ -521,14 +518,14 @@ test "Contents clear last added content" {
     // Row 1 should still contain its cells.
     try testing.expectEqual(bg_cell_1, c.bgCell(1, 4).*);
     // Fg row index is +1 because of cursor list at start
-    try testing.expectEqual(fg_cell_1, c.fg_rows.lists[2].items[0]);
+    try testing.expectEqual(fg_cell_1, c.fg_rows[2].items[0]);
 }
 
 test "Contents with zero-sized screen" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var c: TestContents = .{};
+    var c: Contents = .{};
     defer c.deinit(alloc);
 
     c.setCursor(null, null);
@@ -539,7 +536,7 @@ test "Cell constraint widths" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var t: terminal.Terminal = try .init(alloc, .{
+    var t: terminal.Terminal = try .init(testing.io, alloc, .{
         .cols = 4,
         .rows = 1,
     });
@@ -557,7 +554,7 @@ test "Cell constraint widths" {
     // symbol->nothing: 2
     {
         t.fullReset();
-        s.nextSlice("");
+        s.nextSlice("");
         try state.update(alloc, &t);
         try testing.expectEqual(2, constraintWidth(
             state.row_data.get(0).cells.items(.raw),
@@ -569,7 +566,7 @@ test "Cell constraint widths" {
     // symbol->character: 1
     {
         t.fullReset();
-        s.nextSlice("z");
+        s.nextSlice("z");
         try state.update(alloc, &t);
         try testing.expectEqual(1, constraintWidth(
             state.row_data.get(0).cells.items(.raw),
@@ -581,7 +578,7 @@ test "Cell constraint widths" {
     // symbol->space: 2
     {
         t.fullReset();
-        s.nextSlice(" z");
+        s.nextSlice(" z");
         try state.update(alloc, &t);
         try testing.expectEqual(2, constraintWidth(
             state.row_data.get(0).cells.items(.raw),
@@ -592,7 +589,7 @@ test "Cell constraint widths" {
     // symbol->no-break space: 1
     {
         t.fullReset();
-        s.nextSlice("\u{00a0}z");
+        s.nextSlice("\u{00a0}z");
         try state.update(alloc, &t);
         try testing.expectEqual(1, constraintWidth(
             state.row_data.get(0).cells.items(.raw),
@@ -604,7 +601,7 @@ test "Cell constraint widths" {
     // symbol->end of row: 1
     {
         t.fullReset();
-        s.nextSlice("   ");
+        s.nextSlice("   ");
         try state.update(alloc, &t);
         try testing.expectEqual(1, constraintWidth(
             state.row_data.get(0).cells.items(.raw),
@@ -616,7 +613,7 @@ test "Cell constraint widths" {
     // character->symbol: 2
     {
         t.fullReset();
-        s.nextSlice("z");
+        s.nextSlice("z");
         try state.update(alloc, &t);
         try testing.expectEqual(2, constraintWidth(
             state.row_data.get(0).cells.items(.raw),
@@ -628,7 +625,7 @@ test "Cell constraint widths" {
     // symbol->symbol: 1,1
     {
         t.fullReset();
-        s.nextSlice("");
+        s.nextSlice("");
         try state.update(alloc, &t);
         try testing.expectEqual(1, constraintWidth(
             state.row_data.get(0).cells.items(.raw),
@@ -645,7 +642,7 @@ test "Cell constraint widths" {
     // symbol->space->symbol: 2,2
     {
         t.fullReset();
-        s.nextSlice(" ");
+        s.nextSlice(" ");
         try state.update(alloc, &t);
         try testing.expectEqual(2, constraintWidth(
             state.row_data.get(0).cells.items(.raw),
@@ -662,7 +659,7 @@ test "Cell constraint widths" {
     // symbol->powerline: 1  (dedicated test because powerline is special-cased in cellpkg)
     {
         t.fullReset();
-        s.nextSlice("");
+        s.nextSlice("");
         try state.update(alloc, &t);
         try testing.expectEqual(1, constraintWidth(
             state.row_data.get(0).cells.items(.raw),
@@ -674,7 +671,7 @@ test "Cell constraint widths" {
     // powerline->symbol: 2  (dedicated test because powerline is special-cased in cellpkg)
     {
         t.fullReset();
-        s.nextSlice("");
+        s.nextSlice("");
         try state.update(alloc, &t);
         try testing.expectEqual(2, constraintWidth(
             state.row_data.get(0).cells.items(.raw),
@@ -686,7 +683,7 @@ test "Cell constraint widths" {
     // powerline->nothing: 2  (dedicated test because powerline is special-cased in cellpkg)
     {
         t.fullReset();
-        s.nextSlice("");
+        s.nextSlice("");
         try state.update(alloc, &t);
         try testing.expectEqual(2, constraintWidth(
             state.row_data.get(0).cells.items(.raw),
@@ -698,7 +695,7 @@ test "Cell constraint widths" {
     // powerline->space: 2  (dedicated test because powerline is special-cased in cellpkg)
     {
         t.fullReset();
-        s.nextSlice(" z");
+        s.nextSlice(" z");
         try state.update(alloc, &t);
         try testing.expectEqual(2, constraintWidth(
             state.row_data.get(0).cells.items(.raw),

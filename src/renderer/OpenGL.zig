@@ -220,7 +220,7 @@ fn prepareContext(getProcAddress: anytype) !void {
 /// Host-provided OpenGL callbacks for the embedded apprt.
 ///
 /// libghostty draws on the app thread for the OpenGL renderer
-/// (`mustDrawFromAppThread()`), so these callbacks are set in
+/// (`must_draw_from_app_thread`), so these callbacks are set in
 /// `surfaceInit` and read by `present` on that same thread. The
 /// renderer thread is a no-op for OpenGL (see threadEnter/threadExit).
 /// `threadlocal` keeps the bookkeeping per-thread without an explicit
@@ -254,7 +254,7 @@ pub fn surfaceInit(surface: *apprt.Surface) !void {
         => try prepareContext(null),
 
         // The OpenGL embedded path draws on the app thread
-        // (mustDrawFromAppThread()). Make the host context current on
+        // (must_draw_from_app_thread). Make the host context current on
         // this — the app — thread and load GL; it stays current here for
         // the surface's lifetime.
         apprt.embedded => switch (surface.platform) {
@@ -298,7 +298,7 @@ pub fn threadEnter(self: *const OpenGL, surface: *apprt.Surface) !void {
         else => @compileError("unsupported app runtime for OpenGL"),
 
         // GTK and the OpenGL embedded path both draw on the app thread
-        // (mustDrawFromAppThread()), so the renderer thread must not
+        // (must_draw_from_app_thread), so the renderer thread must not
         // touch the GL context.
         apprt.gtk, apprt.embedded => {},
     }
@@ -601,6 +601,12 @@ fn presentDmabuf(
         h,
         dt.stride,
     );
+}
+
+/// Called when the renderer released its GPU resources; the last
+/// presented target is deinited with them so we must drop our copy.
+pub fn gpuResourcesReleased(self: *OpenGL) void {
+    self.last_target = null;
 }
 
 /// Returns the options to use when constructing buffers.

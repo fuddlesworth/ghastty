@@ -13,6 +13,7 @@ const CoreApp = @import("../../App.zig");
 const Application = @import("class/application.zig").Application;
 const Surface = @import("Surface.zig");
 const ipcNewWindow = @import("ipc/new_window.zig").newWindow;
+const ipcNewTab = @import("ipc/new_tab.zig").newTab;
 const ipcToggleQuickTerminal = @import("ipc/toggle_quick_terminal.zig").toggleQuickTerminal;
 const rendererpkg = @import("../../renderer.zig");
 
@@ -26,13 +27,10 @@ const log = std.log.scoped(.gtk);
 /// per-surface `DmabufPaintable`: the renderer thread only parks the
 /// frame (under a mutex), and a GUI-thread frame-clock tick builds the
 /// `GdkTexture` and calls `queueDraw` — so Vulkan can present from the
-/// renderer thread. A build can contain both backends with the renderer
-/// chosen at runtime: OpenGL must draw on the GUI thread (its GL context
-/// lives there), Vulkan draws on the renderer thread (presents via
-/// dmabuf).
-pub fn mustDrawFromAppThread() bool {
-    return rendererpkg.activeBackend() == .opengl;
-}
+/// renderer thread. The backend is chosen at build time: OpenGL must
+/// draw on the GUI thread (its GL context lives there), Vulkan draws on
+/// the renderer thread (presents via dmabuf).
+pub const must_draw_from_app_thread = rendererpkg.activeBackend() == .opengl;
 
 /// GTK application ID
 pub const application_id = @import("build/info.zig").application_id;
@@ -97,6 +95,7 @@ pub fn performIpc(
 ) !bool {
     switch (action) {
         .new_window => return try ipcNewWindow(alloc, target, value),
+        .new_tab => return try ipcNewTab(alloc, target, value),
         .toggle_quick_terminal => return try ipcToggleQuickTerminal(alloc, target),
     }
 }

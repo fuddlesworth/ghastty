@@ -40,6 +40,7 @@
 pub const Vulkan = @This();
 
 const std = @import("std");
+const global = @import("../global.zig");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const vulkan = @import("vulkan");
@@ -182,7 +183,7 @@ var device: ?Device = null;
 /// surfaces' renderer threads run independently and may init/deinit
 /// concurrently.
 var device_refcount: usize = 0;
-var device_mutex: std.Thread.Mutex = .{};
+var device_mutex: std.Io.Mutex = .init;
 
 /// Cross-frame buffer recycle pool. See `vulkan/buffer_pool.zig`
 /// for the full lifecycle / multi-thread contract. Re-exported so
@@ -202,12 +203,12 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !Vulkan {
     // `FrameState.init` starts asking for buffer/texture options.
     // Process-wide (not threadlocal): the renderer thread is
     // distinct from the main thread that constructs the surface.
-    device_mutex.lock();
-    defer device_mutex.unlock();
+    device_mutex.lockUncancelable(global.io());
+    defer device_mutex.unlock(global.io());
     if (device == null) {
         const platform = surfacePlatform(opts.rt_surface) orelse
             return error.UnsupportedPlatform;
-        device = try Device.init(alloc, try bootstrapFromPlatform(platform));
+        device = try Device.init(alloc, global.io(), try bootstrapFromPlatform(platform));
         log.info(
             "Vulkan device ready (api=0x{x})",
             .{device.?.api_version},
@@ -234,8 +235,8 @@ pub fn deinit(self: *Vulkan) void {
     // crashes (or invisibly silences) every other surface's
     // renderer thread.
     {
-        device_mutex.lock();
-        defer device_mutex.unlock();
+        device_mutex.lockUncancelable(global.io());
+        defer device_mutex.unlock(global.io());
         // Refcount-underflow guard. Was `std.debug.assert(refcount > 0)`,
         // but assertions compile out in ReleaseFast / ReleaseSmall — a
         // double-deinit would silently underflow the unsigned counter

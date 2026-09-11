@@ -50,7 +50,7 @@ class OverlayScrollbar;
 // Terminal pixels reach the screen via a wl_subsurface attached to
 // the top-level QWindow's wl_surface (see wayland::SubsurfacePresenter).
 // libghostty's renderer (Vulkan or OpenGL, picked at runtime — see
-// the ctor's ghostty_set_renderer wiring) hands us a dmabuf fd per
+// the ctor's ghostty_renderer_backend() wiring) hands us a dmabuf fd per
 // frame (Vulkan) or we export one from the GL FBO (OpenGL); we wrap
 // it in a wl_buffer via zwp_linux_dmabuf_v1 and the compositor
 // scans it out directly — no readback, no QPainter blit for the

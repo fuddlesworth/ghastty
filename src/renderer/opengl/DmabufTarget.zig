@@ -130,7 +130,7 @@ pub fn init(
         log.warn("eglExportDMABUFImageMESA failed", .{});
         return error.DmabufExportUnsupported;
     }
-    errdefer std.posix.close(fd);
+    errdefer _ = std.os.linux.close(fd);
     if (offset != 0) {
         log.warn("dmabuf export reported non-zero offset {d}; unsupported", .{offset});
         return error.DmabufExportUnsupported;
@@ -182,6 +182,6 @@ pub fn deinit(self: *Self) void {
     gl.glad.context.DeleteFramebuffers.?(1, &self.framebuffer);
     gl.glad.context.DeleteTextures.?(1, &self.texture);
     _ = self.dispatch.destroyImage(self.display, self.image);
-    std.posix.close(self.fd);
+    _ = std.os.linux.close(self.fd);
     self.* = undefined;
 }

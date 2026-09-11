@@ -1,6 +1,7 @@
 #include "GhosttyApp.h"
 
 #include <cstdio>
+#include <cstring>
 
 #include <QApplication>
 #include <QByteArray>
@@ -262,8 +263,9 @@ bool GhosttyApp::surfaceAlive(GhosttySurface *s) const {
   return false;
 }
 
-bool GhosttyApp::onReadClipboard(void *ud, ghostty_clipboard_e loc,
-                                 void *state) {
+ghostty_clipboard_read_result_e GhosttyApp::onReadClipboard(
+    void *ud, ghostty_clipboard_e loc, void *state, const char *const *mimes,
+    size_t mimes_len, bool want_available) {
   // surface userdata. Called synchronously by libghostty when a
   // surface needs clipboard contents (paste). This runs on the GUI
   // thread by construction: every libghostty entry point that
@@ -273,33 +275,79 @@ bool GhosttyApp::onReadClipboard(void *ud, ghostty_clipboard_e loc,
   // is safe; surfaceAlive still validates the pointer in case a
   // surface is mid-destruction on this same thread.
   auto *surface = static_cast<GhosttySurface *>(ud);
-  if (!instance().surfaceAlive(surface) || !surface->surface()) return false;
+  if (!instance().surfaceAlive(surface) || !surface->surface())
+    return GHOSTTY_CLIPBOARD_READ_UNAVAILABLE;
+
+  // We serve text only. The core always asks for text-like data as the
+  // canonical "text/plain", so if that isn't among the requested MIME
+  // types there is nothing we can provide.
+  static constexpr char kTextPlain[] = "text/plain";
+  bool wants_text = false;
+  for (size_t i = 0; i < mimes_len; i++) {
+    if (mimes[i] && std::strcmp(mimes[i], kTextPlain) == 0) {
+      wants_text = true;
+      break;
+    }
+  }
+  if (!wants_text) return GHOSTTY_CLIPBOARD_READ_UNSUPPORTED;
 
   const QClipboard::Mode mode = loc == GHOSTTY_CLIPBOARD_SELECTION
                                     ? QClipboard::Selection
                                     : QClipboard::Clipboard;
   const QByteArray text = QGuiApplication::clipboard()->text(mode).toUtf8();
-  ghostty_surface_complete_clipboard_request(surface->surface(),
-                                             text.constData(), state, true);
-  return true;
+
+  const ghostty_clipboard_content_s content = {
+      kTextPlain,
+      text.constData(),
+      static_cast<size_t>(text.size()),
+  };
+  // The listing of what's on the clipboard, only when asked for. We
+  // only ever serve text, so that listing is just "text/plain".
+  const char *const available[] = {kTextPlain};
+  const ghostty_clipboard_complete_s complete = {
+      &content,
+      1,
+      want_available ? available : nullptr,
+      want_available ? 1u : 0u,
+      true,
+      false,
+  };
+  ghostty_surface_complete_clipboard_request(surface->surface(), &complete,
+                                             state);
+  return GHOSTTY_CLIPBOARD_READ_STARTED;
 }
 
-void GhosttyApp::onConfirmReadClipboard(void *ud, const char *str,
-                                        void *state,
-                                        ghostty_clipboard_request_e) {
+void GhosttyApp::onConfirmReadClipboard(
+    void *ud, const ghostty_clipboard_confirm_s *confirm, void *state,
+    ghostty_clipboard_request_e) {
   // libghostty asks for confirmation when a paste looks unsafe. The
   // dialog MUST be deferred: this callback runs inside libghostty,
   // and a modal dialog here spins a nested event loop that re-enters
   // libghostty through the render tick — a crash/freeze. `state` is
-  // a completion token valid until used; `str` is not, so copy it.
+  // a completion token valid until used; `confirm` and everything it
+  // points at are borrowed for this call only, so copy what we need.
   auto *surface = static_cast<GhosttySurface *>(ud);
   if (!instance().surfaceAlive(surface) || !surface->surface()) return;
+  if (!confirm) return;
+
+  // Copy the would-be completion contents. We only render text in the
+  // prompt, and we only serve text back, so collapse to the first
+  // text-like representation.
+  QByteArray content;
+  QByteArray mime;
+  for (size_t i = 0; i < confirm->contents_len; i++) {
+    const ghostty_clipboard_content_s &c = confirm->contents[i];
+    if (!c.data) continue;
+    content = QByteArray(c.data, static_cast<qsizetype>(c.len));
+    mime = QByteArray(c.mime ? c.mime : "text/plain");
+    break;
+  }
+  if (mime.isEmpty()) mime = QByteArrayLiteral("text/plain");
 
   QPointer<GhosttySurface> sp(surface);
-  const QByteArray content(str);
   QMetaObject::invokeMethod(
       surface->owner(),
-      [sp, content, state]() {
+      [sp, content, mime, state]() {
         if (!sp || !sp->surface()) return;
         QString preview = QString::fromUtf8(content);
         // Truncate by code unit but back off to a non-surrogate
@@ -327,9 +375,21 @@ void GhosttyApp::onConfirmReadClipboard(void *ud, const char *str,
         // surface — completing it against the freed surface would be a
         // use-after-free, so just drop it.
         if (!sp || !sp->surface()) return;
-        ghostty_surface_complete_clipboard_request(
-            sp->surface(), content.constData(), state,
-            box.clickedButton() == paste);
+        const ghostty_clipboard_content_s c = {
+            mime.constData(),
+            content.constData(),
+            static_cast<size_t>(content.size()),
+        };
+        const ghostty_clipboard_complete_s complete = {
+            &c,
+            1,
+            nullptr,
+            0,
+            box.clickedButton() == paste,
+            false,
+        };
+        ghostty_surface_complete_clipboard_request(sp->surface(), &complete,
+                                                   state);
       },
       Qt::QueuedConnection);
 }

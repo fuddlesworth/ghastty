@@ -5,6 +5,8 @@ const ArenaAllocator = std.heap.ArenaAllocator;
 const glslang = @import("glslang");
 const spvcross = @import("spirv_cross");
 const configpkg = @import("../config.zig");
+const compat_file = @import("../lib/compat/file.zig");
+const global = @import("../global.zig");
 
 const log = std.log.scoped(.shadertoy);
 
@@ -151,11 +153,11 @@ pub fn loadFromFile(
     // Read it all into memory -- we don't expect shaders to be large.
     const src = src: {
         // Load the shader file
-        const cwd = std.fs.cwd();
-        const file = try cwd.openFile(path, .{});
-        defer file.close();
-
-        break :src try file.readToEndAlloc(
+        const cwd = std.Io.Dir.cwd();
+        const file = try cwd.openFile(global.io(), path, .{});
+        defer file.close(global.io());
+        break :src try compat_file.readToEndAlloc(
+            file,
             alloc,
             4 * 1024 * 1024, // 4MB
         );
@@ -328,7 +330,7 @@ pub fn glslFromShader(
 /// Same problem and same fix as the C++ shim's spv_cache in
 /// pkg/glslang/override/ghastty_vk_shim.cpp; this one covers the
 /// C-API path that the shim doesn't see.
-var spv_cache_mutex: std.Thread.Mutex = .{};
+var spv_cache_mutex: std.Io.Mutex = .init;
 var spv_cache: std.StringHashMapUnmanaged([]const u8) = .empty;
 
 /// Convert a GLSL shader into SPIR-V assembly.
@@ -344,8 +346,8 @@ pub fn spirvFromGlsl(
     // file + a small set of `#define` lines, so identical sources
     // produce identical SPV.
     {
-        spv_cache_mutex.lock();
-        defer spv_cache_mutex.unlock();
+        spv_cache_mutex.lockUncancelable(global.io());
+        defer spv_cache_mutex.unlock(global.io());
         const key: []const u8 = src[0..src.len];
         if (spv_cache.get(key)) |cached| {
             try writer.writeAll(cached);
@@ -409,8 +411,8 @@ pub fn spirvFromGlsl(
     // which is small (typically 1-3); even at 100 KB per shader
     // the total cache cost is negligible against the per-tab pool
     // pages we'd otherwise leak.
-    spv_cache_mutex.lock();
-    defer spv_cache_mutex.unlock();
+    spv_cache_mutex.lockUncancelable(global.io());
+    defer spv_cache_mutex.unlock(global.io());
     const key: []const u8 = src[0..src.len];
     if (!spv_cache.contains(key)) {
         const key_copy = std.heap.smp_allocator.dupe(u8, key) catch return;

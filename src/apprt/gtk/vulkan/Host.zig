@@ -25,6 +25,7 @@
 //! imported as a dmabuf texture.
 
 const std = @import("std");
+const global = @import("../../../global.zig");
 const builtin = @import("builtin");
 const apprt = @import("../../../apprt.zig");
 const gdk = @import("gdk");
@@ -64,7 +65,7 @@ const required_device_extensions: []const [*:0]const u8 = &.{
 /// the runtime-fallible init we need (init can fail and leave the
 /// host as null; we still want subsequent `instance()` calls to
 /// short-circuit on `once_done` and return null).
-var once_mutex: std.Thread.Mutex = .{};
+var once_mutex: std.Io.Mutex = .init;
 var once_done: bool = false;
 var host: ?Host = null;
 
@@ -120,8 +121,8 @@ pub fn instance() ?*const Host {
         return if (host) |*h| h else null;
     }
 
-    once_mutex.lock();
-    defer once_mutex.unlock();
+    once_mutex.lockUncancelable(global.io());
+    defer once_mutex.unlock(global.io());
     if (!once_done) {
         var built: Host = undefined;
         if (bringUp(&built)) |_| {
@@ -147,8 +148,8 @@ pub fn instance() ?*const Host {
 /// work that outlived the join; it does not substitute for the
 /// thread-join ordering above.
 pub fn deinit() void {
-    once_mutex.lock();
-    defer once_mutex.unlock();
+    once_mutex.lockUncancelable(global.io());
+    defer once_mutex.unlock(global.io());
     const h = if (host) |*h| h else return;
     _ = dispatch.deviceWaitIdle(h.device_handle);
     dispatch.destroyDevice(h.device_handle, null);
