@@ -51,6 +51,18 @@ class XkbTracker {
   // sent a modifiers event yet.
   uint32_t activeGroup() const { return m_group; }
 
+  // The compositor-delivered XKB keycode for the current Qt key event,
+  // or 0 if the most recent wl_keyboard.key event doesn't match the Qt
+  // event's timestamp/action. Qt's nativeScanCode() has been observed to
+  // be neither reliably evdev nor reliably XKB across platform plugins;
+  // the wl_keyboard payload is unambiguously evdev, which we convert to
+  // the XKB keycode (evdev+8) that libxkbcommon and libghostty expect.
+  uint32_t keycodeForEvent(uint32_t timestamp, bool pressed) const;
+
+  // Qt synthesizes auto-repeat QKeyEvents with no matching wl_keyboard.key
+  // event; reuse the last pressed compositor keycode for those.
+  uint32_t lastPressedKeycode() const { return m_lastPressedKeycode; }
+
   // Listener entry points are public because they're addressed by C
   // function pointer in the wl_keyboard_listener / wl_seat_listener
   // / wl_registry_listener structs. They are not part of the public
@@ -90,6 +102,15 @@ class XkbTracker {
   xkb_state *m_state = nullptr;
   uint32_t m_modsLocked = 0;
   uint32_t m_group = 0;
+  // Last wl_keyboard.key event, cached so GhosttySurface can pair the
+  // Qt QKeyEvent with the compositor's raw key identity (XKB keycode).
+  uint32_t m_lastKeyTime = 0;
+  uint32_t m_lastKeycode = 0;
+  bool m_lastKeyPressed = false;
+  bool m_haveLastKey = false;
+  // The most recent keycode whose press has not yet been released; used
+  // to back Qt's synthesized auto-repeat events.
+  uint32_t m_lastPressedKeycode = 0;
   // Indices into the keymap for the lock mods. XKB_MOD_INVALID until
   // a keymap is loaded.
   uint32_t m_idxCapsLock = ~0u;

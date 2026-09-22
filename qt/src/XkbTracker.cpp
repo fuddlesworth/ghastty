@@ -128,6 +128,13 @@ bool XkbTracker::numLockOn() const {
   return (m_modsLocked & (1u << m_idxNumLock)) != 0;
 }
 
+uint32_t XkbTracker::keycodeForEvent(uint32_t timestamp, bool pressed) const {
+  if (!m_haveLastKey) return 0;
+  if (m_lastKeyTime != timestamp) return 0;
+  if (m_lastKeyPressed != pressed) return 0;
+  return m_lastKeycode;
+}
+
 // --- Registry / seat binding ----------------------------------------
 
 void XkbTracker::onRegistryGlobal(void *data, wl_registry *registry,
@@ -221,9 +228,29 @@ void XkbTracker::onKeymap(void *data, wl_keyboard * /*kb*/, uint32_t format,
 void XkbTracker::onEnter(void *, wl_keyboard *, uint32_t, wl_surface *,
                          wl_array *) {}
 void XkbTracker::onLeave(void *, wl_keyboard *, uint32_t, wl_surface *) {}
-void XkbTracker::onKey(void *, wl_keyboard *, uint32_t, uint32_t, uint32_t,
-                       uint32_t) {
-  // Qt delivers key events; we don't want to double-process here.
+void XkbTracker::onKey(void *data, wl_keyboard *, uint32_t, uint32_t time,
+                       uint32_t key, uint32_t state) {
+  auto *self = static_cast<XkbTracker *>(data);
+
+  // Qt still delivers the actual QKeyEvent that drives input; we only
+  // cache the compositor's raw key identity so GhosttySurface can resolve
+  // the same XKB keycode the GTK frontend gets, independent of Qt's
+  // platform-dependent nativeScanCode(). Wayland reports evdev keycodes
+  // here; libxkbcommon and libghostty use XKB keycodes, which are evdev+8.
+  static constexpr uint32_t kEvdevToXkbOffset = 8;
+  const uint32_t xkbKeycode = key + kEvdevToXkbOffset;
+  const bool pressed = state == WL_KEYBOARD_KEY_STATE_PRESSED;
+
+  self->m_lastKeyTime = time;
+  self->m_lastKeycode = xkbKeycode;
+  self->m_lastKeyPressed = pressed;
+  self->m_haveLastKey = true;
+
+  if (pressed) {
+    self->m_lastPressedKeycode = xkbKeycode;
+  } else if (self->m_lastPressedKeycode == xkbKeycode) {
+    self->m_lastPressedKeycode = 0;
+  }
 }
 
 void XkbTracker::onModifiers(void *data, wl_keyboard *, uint32_t,
