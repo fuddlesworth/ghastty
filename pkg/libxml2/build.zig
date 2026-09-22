@@ -105,6 +105,16 @@ pub fn build(b: *std.Build) !void {
     }
 
     if (upstream_) |upstream| {
+        // libxml2's error macros expand `__FILE__`, which bakes the absolute
+        // path of the vendored source tree into the binary. Remap it to a
+        // stable relative prefix so builds are reproducible and packagers
+        // don't ship references to their build directory.
+        try flags.append(b.allocator, try std.fmt.allocPrint(
+            b.allocator,
+            "-ffile-prefix-map={s}=libxml2",
+            .{upstream.path("").getPath(b)},
+        ));
+
         lib.root_module.addCSourceFiles(.{
             .root = upstream.path(""),
             .files = srcs,
